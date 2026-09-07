@@ -1,0 +1,33 @@
+# Render Blueprint — deploys the FastAPI backend.
+# Create via Render dashboard → New → Blueprint, then fill the secrets marked
+# sync:false. The frontend deploys separately on Vercel (see frontend/vercel.json).
+services:
+  - type: web
+    name: mj-manufacturing-api
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      # pandas 2.2.3 ships no wheels for 3.13; pin to the version used locally.
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      # Neon connection string — same one used locally.
+      - key: DATABASE_URL
+        sync: false
+      # Generated once by Render and kept secret. Changing it logs everyone out.
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: USER_EMAIL
+        sync: false
+      - key: USER_PASSWORD
+        sync: false
+      # Comma-separated. Set to the Vercel URL once the frontend is deployed.
+      - key: CORS_ORIGINS
+        sync: false
