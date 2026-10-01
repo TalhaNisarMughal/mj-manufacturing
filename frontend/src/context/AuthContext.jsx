@@ -26,8 +26,14 @@ export function AuthProvider({ children }) {
     setUser(null)
   }
 
+  // Cost prices and profit are admin-only. The server already withholds them
+  // from a staff token, so this is only about not rendering empty columns.
+  const isAdmin = user?.role === 'admin'
+
   return (
-    <AuthContext.Provider value={{ user, login, logout }}>{children}</AuthContext.Provider>
+    <AuthContext.Provider value={{ user, isAdmin, login, logout }}>
+      {children}
+    </AuthContext.Provider>
   )
 }
 

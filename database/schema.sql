@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS users (
 
 -- -------------------------------------------------------------- customers
 -- Customer Code (PK), Customer Name, Phone Number, Shop Name (optional),
--- Address (optional), Datetime (auto on creation)
+-- Address (optional), Datetime (set by the user, defaults to now)
 CREATE TABLE IF NOT EXISTS customers (
     customer_code VARCHAR(50)  PRIMARY KEY,
     customer_name VARCHAR(255) NOT NULL,
@@ -27,12 +27,15 @@ CREATE TABLE IF NOT EXISTS customers (
 );
 
 -- ------------------------------------------------------------------ stock
--- Stock Barcode (PK), Stock Name, Qty, Unit Price, Datetime (auto)
+-- Stock Barcode (PK), Stock Name, Qty, Unit Price, Cost Price, Datetime.
+-- cost_price is what the item costs us; it is admin-only and never printed on
+-- a bill. unit_price is what we sell it for. created_at is set by the user.
 CREATE TABLE IF NOT EXISTS stock (
     stock_barcode VARCHAR(100) PRIMARY KEY,
     stock_name    VARCHAR(255) NOT NULL,
     qty           INTEGER      NOT NULL DEFAULT 0 CHECK (qty >= 0),
     unit_price    NUMERIC(12,2) NOT NULL DEFAULT 0 CHECK (unit_price >= 0),
+    cost_price    NUMERIC(12,2) NOT NULL DEFAULT 0 CHECK (cost_price >= 0),
     created_at    TIMESTAMP NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc')
 );
 
@@ -49,6 +52,8 @@ CREATE TABLE IF NOT EXISTS bills (
     remaining_balance NUMERIC(14,2) NOT NULL DEFAULT 0,
     status            VARCHAR(10)  NOT NULL DEFAULT 'open'
                       CHECK (status IN ('open','closed')),
+    -- purchase_date is chosen by the user (backdating is allowed);
+    -- last_modified is an audit stamp and is always set automatically.
     purchase_date     TIMESTAMP NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc'),
     last_modified     TIMESTAMP NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc')
 );
@@ -66,6 +71,7 @@ CREATE TABLE IF NOT EXISTS bill_items (
     item_name        VARCHAR(255) NOT NULL,          -- snapshot at billing time
     description      TEXT,
     unit_price       NUMERIC(12,2) NOT NULL,
+    cost_price       NUMERIC(12,2) NOT NULL DEFAULT 0, -- cost snapshot at billing time
     discounted_price NUMERIC(12,2),                  -- per-unit price after discount
     discount_percent NUMERIC(6,2)  NOT NULL DEFAULT 0,
     qty              INTEGER NOT NULL CHECK (qty > 0),
@@ -95,3 +101,12 @@ CREATE TABLE IF NOT EXISTS counters (
     name  VARCHAR(50) PRIMARY KEY,
     value INTEGER NOT NULL DEFAULT 0
 );
+
+-- ============================================================================
+-- Migrations for databases created before a column existed.
+-- Idempotent on PostgreSQL. The equivalent logic lives in
+-- backend/app/migrations.py, which runs on every startup and also covers
+-- SQLite, so applying this file by hand is optional.
+-- ============================================================================
+ALTER TABLE stock      ADD COLUMN IF NOT EXISTS cost_price NUMERIC(12,2) NOT NULL DEFAULT 0;
+ALTER TABLE bill_items ADD COLUMN IF NOT EXISTS cost_price NUMERIC(12,2) NOT NULL DEFAULT 0;

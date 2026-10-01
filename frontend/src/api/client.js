@@ -2,6 +2,10 @@ import axios from 'axios'
 
 const api = axios.create({
   baseURL: (import.meta.env.VITE_API_URL || 'http://localhost:8000') + '/api',
+  // The combined ledger takes several customers / salesmen / items at once.
+  // `indexes: null` repeats the bare key (?salesman=A&salesman=B) instead of
+  // axios's default bracket form, which FastAPI would not read as a list.
+  paramsSerializer: { indexes: null },
 })
 
 api.interceptors.request.use((config) => {
@@ -56,6 +60,42 @@ export const fmtDate = (iso) =>
         minute: '2-digit',
       })
     : '—'
+
+const pad = (n) => String(n).padStart(2, '0')
+
+/**
+ * A stored instant -> the value a <input type="datetime-local"> wants, in the
+ * viewer's own timezone. The server stores UTC; the user thinks in wall-clock
+ * time, and this is the only place that gap is bridged on the way out.
+ */
+export const toLocalInput = (iso) => {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  return (
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+    `T${pad(d.getHours())}:${pad(d.getMinutes())}`
+  )
+}
+
+/** Right now, ready to drop into a datetime-local input. */
+export const nowLocalInput = () => toLocalInput(new Date().toISOString())
+
+/**
+ * The inverse: what the user picked on their clock -> a real instant for the
+ * API. Returns null for an empty field, which tells the server "use now".
+ */
+export const toInstant = (localValue) => {
+  if (!localValue) return null
+  const d = new Date(localValue)
+  return Number.isNaN(d.getTime()) ? null : d.toISOString()
+}
+
+export const fmtPercent = (n) =>
+  `${Number(n ?? 0).toLocaleString('en-PK', {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  })}%`
 
 export const fmtDay = (iso) =>
   iso

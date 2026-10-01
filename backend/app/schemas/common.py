@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -22,12 +23,15 @@ class TokenOut(BaseModel):
 
 
 # ------------------------------------------------------------------ customers
+# `created_at` is optional everywhere: the forms send the date the user picked,
+# and leaving it out keeps the old behaviour of stamping "now".
 class CustomerCreate(BaseModel):
     customer_code: str = Field(min_length=1, max_length=50)
     customer_name: str = Field(min_length=1, max_length=255)
     phone_number: str = Field(min_length=4, max_length=50)
     shop_name: Optional[str] = Field(default=None, max_length=255)
     address: Optional[str] = None
+    created_at: Optional[datetime] = None
 
 
 class CustomerUpdate(BaseModel):
@@ -35,17 +39,25 @@ class CustomerUpdate(BaseModel):
     phone_number: str = Field(min_length=4, max_length=50)
     shop_name: Optional[str] = Field(default=None, max_length=255)
     address: Optional[str] = None
+    created_at: Optional[datetime] = None
 
 
 # ------------------------------------------------------------------ stock
+# `cost_price` is only honoured for an admin. A staff login never sees the field
+# and never sends it; the router then falls back to the selling price on create
+# and leaves the stored cost untouched on update.
 class StockCreate(BaseModel):
     stock_barcode: str = Field(min_length=1, max_length=100)
     stock_name: str = Field(min_length=1, max_length=255)
     qty: int = Field(ge=0)
     unit_price: float = Field(ge=0)
+    cost_price: Optional[float] = Field(default=None, ge=0)
+    created_at: Optional[datetime] = None
 
 
 class StockUpdate(BaseModel):
     stock_name: str = Field(min_length=1, max_length=255)
     qty: int = Field(ge=0)
     unit_price: float = Field(ge=0)
+    cost_price: Optional[float] = Field(default=None, ge=0)
+    created_at: Optional[datetime] = None

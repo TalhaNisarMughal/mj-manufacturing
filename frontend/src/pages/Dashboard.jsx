@@ -11,7 +11,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import api, { apiError, fmtMoney } from '../api/client'
+import api, { apiError, fmtMoney, fmtPercent } from '../api/client'
 import { useToast } from '../context/ToastContext'
 
 const GRANULARITIES = [
@@ -95,9 +95,31 @@ export default function Dashboard() {
         <StatCard label="Closed Ledgers" value={t.closed_bills} sub="fully cleared bills" accent="green" />
       </div>
 
+      {/* Profit is its own band: it is the only figure on this page derived from
+          cost prices, and the Dashboard is already admin-only. */}
+      <div className="stat-grid stat-grid--profit">
+        <StatCard
+          label="Gross Profit (All Time)"
+          value={fmtMoney(t.gross_profit)}
+          sub={`${fmtPercent(t.margin_percent)} margin on everything sold`}
+          accent={t.gross_profit < 0 ? 'amber' : 'profit'}
+        />
+        <StatCard
+          label="Profit This Month"
+          value={fmtMoney(t.profit_this_month)}
+          sub={`${fmtPercent(t.margin_this_month)} margin · ${fmtMoney(t.revenue_this_month)} billed`}
+          accent={t.profit_this_month < 0 ? 'amber' : 'profit'}
+        />
+        <StatCard
+          label="Cost of Goods Sold"
+          value={fmtMoney(t.cost_of_goods)}
+          sub="What the goods on every bill cost us"
+        />
+      </div>
+
       <div className="card chart-card">
         <div className="card-title-row">
-          <h2>Revenue — billed vs collected</h2>
+          <h2>Revenue — billed, collected and profit</h2>
           <div className="segmented">
             {GRANULARITIES.map((g) => (
               <button
@@ -110,6 +132,10 @@ export default function Dashboard() {
             ))}
           </div>
         </div>
+        <p className="ledger-note">
+          Profit is counted on the date of the sale, not when the customer pays — which is why it
+          tracks <b>billed</b> rather than <b>collected</b>.
+        </p>
         <ResponsiveContainer width="100%" height={300}>
           <AreaChart data={series} margin={{ top: 10, right: 16, bottom: 0, left: 8 }}>
             <defs>
@@ -121,6 +147,10 @@ export default function Dashboard() {
                 <stop offset="0%" stopColor="#067647" stopOpacity={0.22} />
                 <stop offset="100%" stopColor="#067647" stopOpacity={0.02} />
               </linearGradient>
+              <linearGradient id="profit" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="#7C3AED" stopOpacity={0.22} />
+                <stop offset="100%" stopColor="#7C3AED" stopOpacity={0.02} />
+              </linearGradient>
             </defs>
             <CartesianGrid stroke="#EBE8DE" vertical={false} />
             <XAxis dataKey="label" tick={{ fontSize: 11.5, fill: '#5B6472' }} tickLine={false} axisLine={{ stroke: '#E3E0D6' }} />
@@ -129,6 +159,7 @@ export default function Dashboard() {
             <Legend wrapperStyle={{ fontSize: 12.5 }} />
             <Area type="monotone" dataKey="billed" name="Billed" stroke="#1D5BD8" strokeWidth={2} fill="url(#billed)" />
             <Area type="monotone" dataKey="collected" name="Collected" stroke="#067647" strokeWidth={2} fill="url(#collected)" />
+            <Area type="monotone" dataKey="profit" name="Profit" stroke="#7C3AED" strokeWidth={2} fill="url(#profit)" />
           </AreaChart>
         </ResponsiveContainer>
       </div>
@@ -160,6 +191,53 @@ export default function Dashboard() {
                 <Bar dataKey="qty_sold" name="Units sold" fill="#1D5BD8" radius={[0, 4, 4, 0]} barSize={16} />
               </BarChart>
             </ResponsiveContainer>
+          )}
+        </div>
+
+        <div className="card">
+          <div className="card-title-row">
+            <h2>Most profitable items</h2>
+          </div>
+          {!summary.top_profit_items?.length ? (
+            <p className="empty-note">No sales yet.</p>
+          ) : (
+            <>
+              <p className="ledger-note">
+                Rarely the same order as “most sold” — the gap between the two lists is usually the
+                interesting part.
+              </p>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Item</th>
+                      <th className="th-num">Units</th>
+                      <th className="th-num">Revenue</th>
+                      <th className="th-num">Profit</th>
+                      <th className="th-num">Margin</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {summary.top_profit_items.map((r) => (
+                      <tr key={r.stock_barcode}>
+                        <td>
+                          <div className="rank-meta">
+                            <strong>{r.item_name}</strong>
+                            <span className="td-muted mono">{r.stock_barcode}</span>
+                          </div>
+                        </td>
+                        <td className="td-num mono">{r.qty_sold}</td>
+                        <td className="td-num mono">{fmtMoney(r.revenue)}</td>
+                        <td className={`td-num mono td-strong ${r.profit < 0 ? 'amount-due' : 'amount-profit'}`}>
+                          {fmtMoney(r.profit)}
+                        </td>
+                        <td className="td-num mono td-muted">{fmtPercent(r.margin)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
         </div>
 

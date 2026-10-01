@@ -25,6 +25,10 @@
   --closed-line: #bfe3cd;
   --danger: #b3261e;
   --danger-bg: #fdecea;
+  /* Profit is its own colour so it never reads as either money owed
+     (amber) or money received (green). */
+  --profit: #7c3aed;
+  --profit-bg: #f5f0ff;
 
   --radius: 10px;
   --radius-sm: 7px;
@@ -1784,5 +1788,312 @@ tbody tr:hover {
 
   .ledger-split {
     grid-template-columns: 1fr;
+  }
+}
+
+/* ============================================================================
+   Cost price, profit and manual dates
+   ========================================================================= */
+
+/* Several buttons in a page header (e.g. Store's re-sync + add). */
+.head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.amount-profit {
+  color: var(--profit);
+  font-weight: 600;
+}
+
+.stat-card--profit {
+  border-left-color: var(--profit);
+}
+
+/* The Dashboard's profit band sits apart from the general totals. */
+.stat-grid--profit {
+  margin-top: -4px;
+}
+
+/* Margin percentage tucked under the money figure in the Store table. */
+.margin-pct {
+  display: block;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+/* Live profit-per-unit readout while typing a cost in the Store form. */
+.margin-preview {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--profit-bg);
+  border: 1px solid #e4d8ff;
+  font-size: 13px;
+}
+
+.margin-preview > span:first-child {
+  font-weight: 700;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.margin-preview strong {
+  color: var(--profit);
+  font-size: 15px;
+}
+
+.margin-preview-pct {
+  color: var(--profit);
+  font-weight: 600;
+}
+
+.margin-preview.is-loss {
+  background: var(--open-bg);
+  border-color: var(--open-line);
+}
+
+.margin-preview.is-loss strong,
+.margin-preview.is-loss .margin-preview-pct {
+  color: var(--open);
+}
+
+.margin-preview-warn {
+  font-weight: 700;
+  color: var(--open);
+}
+
+/* ---------------------------------------------------- date & time field */
+.datetime-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.datetime-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.datetime-row .btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------- editable pay history */
+/* The base row is a 3-column grid; an editable history needs a fourth for the
+   edit/delete controls, or they wrap onto a line of their own. */
+.pay-history--editable li {
+  grid-template-columns: 100px 145px 1fr auto;
+  align-items: center;
+}
+
+/* …except a row that has flipped into the inline editor, which is a block. */
+.pay-history--editable li.pay-history-edit {
+  display: block;
+}
+
+.pay-history-actions {
+  display: flex;
+  gap: 2px;
+  justify-content: flex-end;
+}
+
+.pay-history-edit {
+  display: block;
+  background: var(--paper);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+
+.pay-history-edit .form-grid {
+  margin: 0;
+}
+
+/* ============================================================================
+   Combined ledger
+   ========================================================================= */
+.combined-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.combined-pickers {
+  padding: 14px;
+}
+
+.combined-pickers-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.combined-pickers-head h2 {
+  font-family: var(--font-head);
+  font-size: 16px;
+  margin: 0;
+}
+
+.combined-pickers-head .page-sub {
+  margin: 0;
+  flex: 1 1 320px;
+}
+
+.combined-pickers-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.subject-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  background: var(--paper);
+}
+
+.subject-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.subject-picker-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.subject-picker .search-box {
+  flex: 0 0 auto;
+  width: 100%;
+  background: var(--card);
+}
+
+.subject-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.subject-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--blue);
+  background: var(--blue-soft);
+  color: var(--blue-deep);
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  max-width: 100%;
+}
+
+.subject-chip:hover {
+  background: #dbe7fb;
+}
+
+.subject-options {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 260px;
+  overflow-y: auto;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 4px;
+}
+
+.subject-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 6px 7px;
+  cursor: pointer;
+  font: inherit;
+  color: var(--ink);
+}
+
+.subject-option:hover {
+  background: var(--paper);
+}
+
+.subject-option.is-selected {
+  background: var(--blue-soft);
+}
+
+.subject-option-check {
+  flex: 0 0 15px;
+  height: 15px;
+  border: 1.5px solid var(--line);
+  border-radius: 4px;
+  background: var(--card);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+}
+
+.subject-option.is-selected .subject-option-check {
+  background: var(--blue);
+  border-color: var(--blue);
+}
+
+.subject-option-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.subject-option-title {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.subject-option-sub {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+@media (max-width: 1080px) {
+  .combined-pickers-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .subject-options {
+    max-height: 200px;
   }
 }

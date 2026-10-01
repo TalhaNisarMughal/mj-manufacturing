@@ -828,3 +828,226 @@ def item_ledger_pdf(data: dict) -> bytes:
 
     doc.build(story, onFirstPage=_page_furniture, onLaterPages=_page_furniture)
     return buf.getvalue()
+
+
+# ==================================================== combined ledger report
+def combined_ledger_pdf(data: dict) -> bytes:
+    """The cross-ledger report: any mix of customers, salesmen and items.
+
+    Profit is deliberately absent — this report gets handed to customers and
+    salesmen, so margins stay on screen for the admin only.
+    """
+    s = data["summary"]
+    subj = data.get("subjects", {})
+
+    def _names(key: str, field: str) -> str:
+        rows = subj.get(key) or []
+        if not rows:
+            return "<i>All</i>"
+        return ", ".join(str(r.get(field) or "—") for r in rows)
+
+    title_bits = []
+    if subj.get("customers"):
+        title_bits.append(_names("customers", "customer_name"))
+    if subj.get("salesmen"):
+        title_bits.append(_names("salesmen", "salesman_name"))
+    if subj.get("items"):
+        title_bits.append(_names("items", "stock_name"))
+    headline = "  ·  ".join(title_bits) if title_bits else "All sales"
+
+    buf = io.BytesIO()
+    doc = new_doc(buf, "Combined Ledger")
+    story = [
+        header_band("Combined Ledger", headline, "Sales Generated", money(s["revenue"])),
+        Spacer(1, 4 * mm),
+        meta_block(
+            [
+                ("CUSTOMERS", _names("customers", "customer_name")),
+                ("SALESMEN", _names("salesmen", "salesman_name")),
+                ("ITEMS", _names("items", "stock_name")),
+                (
+                    "REPORT FILTERS",
+                    filter_line(data.get("filters", {}))
+                    + f"<br/>First sale: {fmt_day(s.get('first_sale'))}"
+                    + f"<br/>Last sale: {fmt_day(s.get('last_sale'))}",
+                ),
+            ]
+        ),
+        Spacer(1, 4 * mm),
+        stat_tiles(
+            [
+                ("Bills", str(s["bills"]), "#0C2049"),
+                ("Units sold", str(s["units"]), "#0C2049"),
+                ("Revenue", money(s["revenue"]), "#1D5BD8"),
+                ("Collected (share)", money(s["share_paid"]), "#067647"),
+                (
+                    "Outstanding (share)",
+                    money(s["share_outstanding"]),
+                    "#B45309" if Decimal(str(s["share_outstanding"])) > 0 else "#067647",
+                ),
+                ("Customers", str(s["customers"]), "#0C2049"),
+                ("Items", str(s["items"]), "#0C2049"),
+            ]
+        ),
+    ]
+
+    def rollup_table(title: str, rows: list[dict], label_cols: list[tuple[str, str, float]]):
+        """One roll-up section: a few identifying columns, then the same figures."""
+        if not rows:
+            return []
+        out = section(title, SHARE_NOTE)
+        headers = [h for h, _, _ in label_cols] + [
+            "Qty", "Bills", "Amount", "Paid (share)", "Due (share)", "Last Sale",
+        ]
+        widths = [w for _, _, w in label_cols] + [
+            14 * mm, 14 * mm, 26 * mm, 26 * mm, 26 * mm, 24 * mm,
+        ]
+        first = len(label_cols)
+        body = [
+            [Paragraph(str(r.get(f) or "—"), CELL) for _, f, _ in label_cols]
+            + [
+                str(r["qty"]),
+                str(r["bills"]),
+                money(r["amount"]),
+                money(r["share_paid"]),
+                Paragraph(
+                    f'<font color="{"#B45309" if r["share_outstanding"] > 0 else "#067647"}">'
+                    f'{money(r["share_outstanding"])}</font>',
+                    CELL_R,
+                ),
+                fmt_day(r.get("last_date")),
+            ]
+            for r in rows
+        ]
+        out.append(
+            data_table(
+                headers,
+                body,
+                widths,
+                right={first, first + 1, first + 2, first + 3, first + 4},
+                total_row=[""] * (first - 1)
+                + ["GRAND TOTAL", str(s["units"]), str(s["bills"]), money(s["revenue"]),
+                   money(s["share_paid"]), money(s["share_outstanding"]), ""],
+            )
+        )
+        return out
+
+    story += rollup_table(
+        "By Customer",
+        data.get("by_customer") or [],
+        [("Customer", "customer_name", 48 * mm), ("Code", "customer_code", 26 * mm),
+         ("Shop", "shop_name", 42 * mm)],
+    )
+    story += rollup_table(
+        "By Salesman",
+        data.get("by_salesman") or [],
+        [("Salesman", "salesman_name", 116 * mm)],
+    )
+    story += rollup_table(
+        "By Item",
+        data.get("by_item") or [],
+        [("Item", "item_name", 74 * mm), ("Barcode", "stock_barcode", 42 * mm)],
+    )
+
+    # ---- the cross-tab: who sold what to whom -----------------------------
+    combos = data.get("by_combination") or []
+    if combos:
+        story.append(PageBreak())
+        story += section(
+            "Customer × Salesman × Item",
+            "One row per unique combination actually sold. " + SHARE_NOTE,
+        )
+        rows = [
+            [
+                Paragraph(f"<b>{r['customer_name']}</b>", CELL),
+                r["customer_code"],
+                Paragraph(r["salesman_name"] or "—", CELL),
+                Paragraph(r["item_name"], CELL),
+                r["stock_barcode"],
+                str(r["qty"]),
+                str(r["bills"]),
+                money(r["amount"]),
+                money(r["share_paid"]),
+                Paragraph(
+                    f'<font color="{"#B45309" if r["share_outstanding"] > 0 else "#067647"}">'
+                    f'{money(r["share_outstanding"])}</font>',
+                    CELL_R,
+                ),
+                fmt_day(r.get("last_date")),
+            ]
+            for r in combos
+        ]
+        story.append(
+            data_table(
+                ["Customer", "Code", "Salesman", "Item", "Barcode", "Qty", "Bills",
+                 "Amount", "Paid (share)", "Due (share)", "Last Sale"],
+                rows,
+                [38 * mm, 20 * mm, 28 * mm, 38 * mm, 22 * mm, 12 * mm, 12 * mm,
+                 24 * mm, 24 * mm, 24 * mm, 22 * mm],
+                right={5, 6, 7, 8, 9},
+                total_row=["GRAND TOTAL", "", "", "", "", str(s["units"]), str(s["bills"]),
+                           money(s["revenue"]), money(s["share_paid"]),
+                           money(s["share_outstanding"]), ""],
+            )
+        )
+
+    # ---- month by month ---------------------------------------------------
+    monthly = data.get("monthly") or []
+    if monthly:
+        story += section("Month by Month")
+        story.append(
+            data_table(
+                ["Month", "Units Sold", "Revenue"],
+                [[r["label"], str(r["qty"]), money(r["amount"])] for r in monthly],
+                [90 * mm, 45 * mm, 45 * mm],
+                right={1, 2},
+            )
+        )
+
+    # ---- full line detail -------------------------------------------------
+    lines = data.get("lines") or []
+    if lines:
+        story.append(PageBreak())
+        story += section("Full Sales Detail", SHARE_NOTE)
+        rows = [
+            [
+                fmt_dt(l["date"]),
+                l["bill_id"],
+                Paragraph(f"<b>{l['customer_name']}</b>", CELL),
+                Paragraph(l["salesman_name"] or "—", CELL),
+                Paragraph(l["item_name"], CELL),
+                l["stock_barcode"],
+                str(l["qty"]),
+                money(l["unit_price"]),
+                f"{Decimal(str(l['discount_percent'] or 0)):.2f}%",
+                money(l["line_total"]),
+                money(l["share_paid"]),
+                Paragraph(
+                    f'<font color="{"#B45309" if l["share_outstanding"] > 0 else "#067647"}">'
+                    f'{money(l["share_outstanding"])}</font>',
+                    CELL_R,
+                ),
+                l["status"].upper(),
+            ]
+            for l in lines
+        ]
+        story.append(
+            data_table(
+                ["Date", "Bill ID", "Customer", "Salesman", "Item", "Barcode", "Qty",
+                 "Price", "Disc %", "Line Total", "Paid (share)", "Due (share)", "Status"],
+                rows,
+                [26 * mm, 18 * mm, 30 * mm, 24 * mm, 32 * mm, 20 * mm, 10 * mm,
+                 16 * mm, 12 * mm, 20 * mm, 20 * mm, 20 * mm, 14 * mm],
+                right={6, 7, 8, 9, 10, 11},
+                total_row=["GRAND TOTAL", "", "", "", "", "", str(s["units"]), "", "",
+                           money(s["revenue"]), money(s["share_paid"]),
+                           money(s["share_outstanding"]), ""],
+            )
+        )
+
+    if not lines:
+        story += section("No Sales")
+        story.append(empty_note("Nothing matched this combination of subjects and filters."))
+
+    doc.build(story, onFirstPage=_page_furniture, onLaterPages=_page_furniture)
+    return buf.getvalue()

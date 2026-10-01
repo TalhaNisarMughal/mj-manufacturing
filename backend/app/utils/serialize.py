@@ -23,14 +23,25 @@ def customer_to_dict(c) -> dict:
     }
 
 
-def stock_to_dict(s) -> dict:
-    return {
+def stock_to_dict(s, include_cost: bool = False) -> dict:
+    """Store row. `cost_price` is admin-only, so it is left out entirely rather
+    than sent and hidden in the UI — a staff login never receives the number."""
+    out = {
         "stock_barcode": s.stock_barcode,
         "stock_name": s.stock_name,
         "qty": s.qty,
         "unit_price": f2(s.unit_price),
         "created_at": iso(s.created_at),
     }
+    if include_cost:
+        unit = Decimal(str(s.unit_price or 0))
+        cost = Decimal(str(s.cost_price or 0))
+        out["cost_price"] = f2(cost)
+        out["unit_margin"] = f2(unit - cost)
+        out["margin_percent"] = (
+            f2((unit - cost) / unit * Decimal("100")) if unit > 0 else 0.0
+        )
+    return out
 
 
 def bill_to_dict(b) -> dict:

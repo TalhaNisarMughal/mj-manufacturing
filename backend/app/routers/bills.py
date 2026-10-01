@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session, joinedload
 from ..core.deps import get_current_user
 from ..database import get_db
 from ..models import Bill, BillItem, BillPayment, Counter, Customer, Stock
-from ..schemas.bill import BillCreate, BillUpdate, PaymentIn, StatusIn
+from ..schemas.bill import BillCreate, BillUpdate, PaymentIn, PaymentUpdate, StatusIn
+from ..utils.dates import to_naive_utc
 from ..utils.pdf import bill_pdf_path, generate_bill_pdf
 from ..utils.serialize import bill_to_dict
 
@@ -88,8 +89,17 @@ def _resolve_customer(payload: BillCreate, db: Session) -> Customer:
     return customer
 
 
-def _build_items(bill: Bill, items_in, db: Session) -> Decimal:
-    """Validate items, deduct stock, attach BillItem rows. Returns the net total."""
+def _build_items(
+    bill: Bill, items_in, db: Session, keep_cost: dict[str, Decimal] | None = None
+) -> Decimal:
+    """Validate items, deduct stock, attach BillItem rows. Returns the net total.
+
+    `keep_cost` carries the cost snapshots an edited bill already had, keyed by
+    barcode. A line that was on the bill before keeps the cost it was sold at;
+    only genuinely new lines take today's cost from the store. Editing a bill
+    must not retroactively change what the goods cost us.
+    """
+    keep_cost = keep_cost or {}
     net = Decimal("0.00")
     seen: set[str] = set()
 
@@ -130,12 +140,18 @@ def _build_items(bill: Bill, items_in, db: Session) -> Decimal:
 
         stock.qty = available - it.qty  # deduct from inventory
 
+        # Cost always comes from the server, never from the request: the bill
+        # form neither shows nor sends it, which is what keeps the cost off
+        # every printed bill and out of a staff login's reach.
+        cost_price = keep_cost.get(barcode, d2(stock.cost_price))
+
         bill.items.append(
             BillItem(
                 stock_barcode=barcode,
                 item_name=stock.stock_name,
                 description=(it.description or "").strip() or None,
                 unit_price=unit_price,
+                cost_price=cost_price,
                 discounted_price=discounted,
                 discount_percent=discount_pct,
                 qty=it.qty,
@@ -198,14 +214,17 @@ def list_bills(
 def create_bill(payload: BillCreate, db: Session = Depends(get_db)):
     customer = _resolve_customer(payload, db)
     now = datetime.utcnow()
+    # The user picks the purchase date (backdating is allowed); last_modified is
+    # an audit stamp and is always the real clock.
+    purchased = to_naive_utc(payload.purchase_date, now)
 
     bill = Bill(
         bill_id=next_bill_id(db),
         customer_code=customer.customer_code,
         salesman_name=payload.salesman_name.strip(),
         payment_type=payload.payment_type,
-        purchase_date=now,
-        last_modified=now,  # same as purchase date on first creation
+        purchase_date=purchased,
+        last_modified=now,
     )
     db.add(bill)
 
@@ -220,8 +239,13 @@ def create_bill(payload: BillCreate, db: Session = Depends(get_db)):
     bill.status = "closed" if bill.remaining_balance == 0 else "open"
 
     if deposited > 0:
+        # The opening deposit is dated with the purchase, not with "now" — a
+        # backdated bill paid on the day would otherwise show its payment
+        # arriving before... or long after... the sale it belongs to.
         bill.payments.append(
-            BillPayment(amount=deposited, payment_date=now, note="Initial deposit at purchase")
+            BillPayment(
+                amount=deposited, payment_date=purchased, note="Initial deposit at purchase"
+            )
         )
 
     db.commit()
@@ -246,10 +270,12 @@ def update_bill(bill_id: str, payload: BillUpdate, db: Session = Depends(get_db)
 
     # Return previously reserved quantities to the store first, so removed items
     # come back to inventory and new quantities validate against true availability.
+    keep_cost: dict[str, Decimal] = {}
     for it in bill.items:
         stock = db.get(Stock, it.stock_barcode)
         if stock:
             stock.qty += it.qty
+        keep_cost[it.stock_barcode] = d2(it.cost_price)
     bill.items.clear()
     db.flush()
 
@@ -257,7 +283,7 @@ def update_bill(bill_id: str, payload: BillUpdate, db: Session = Depends(get_db)
     bill.salesman_name = payload.salesman_name.strip()
     bill.payment_type = payload.payment_type
 
-    net = _build_items(bill, payload.items, db)
+    net = _build_items(bill, payload.items, db, keep_cost=keep_cost)
     if bill.deposited_amount > net:
         raise HTTPException(
             400,
@@ -269,6 +295,8 @@ def update_bill(bill_id: str, payload: BillUpdate, db: Session = Depends(get_db)
     bill.remaining_balance = (net - bill.deposited_amount).quantize(TWO)
     if bill.remaining_balance == 0:
         bill.status = "closed"
+    if payload.purchase_date is not None:
+        bill.purchase_date = to_naive_utc(payload.purchase_date)
     bill.last_modified = datetime.utcnow()
 
     db.commit()
@@ -311,7 +339,11 @@ def add_payment(bill_id: str, payload: PaymentIn, db: Session = Depends(get_db))
 
     now = datetime.utcnow()
     bill.payments.append(
-        BillPayment(amount=amount, payment_date=now, note=(payload.note or "").strip() or None)
+        BillPayment(
+            amount=amount,
+            payment_date=to_naive_utc(payload.payment_date, now),
+            note=(payload.note or "").strip() or None,
+        )
     )
     bill.deposited_amount = (bill.deposited_amount + amount).quantize(TWO)
     bill.remaining_balance = (bill.remaining_balance - amount).quantize(TWO)
@@ -319,6 +351,83 @@ def add_payment(bill_id: str, payload: PaymentIn, db: Session = Depends(get_db))
     if bill.remaining_balance == 0:
         bill.status = "closed"  # balance cleared — ledger closes automatically
 
+    db.commit()
+    bill = _load_bill(db, bill_id)
+    generate_bill_pdf(bill)
+    return bill_to_dict(bill)
+
+
+def _recompute_from_payments(bill: Bill) -> None:
+    """Re-derive the bill's money and status from the deposits it actually has.
+
+    Used after a deposit is corrected or removed, where adjusting the running
+    totals by a delta would drift. Status follows the balance: clearing a bill
+    closes it, and taking money back off a cleared bill reopens it — but a bill
+    that someone closed by hand while it still had a balance stays closed,
+    because that was a deliberate decision, not an arithmetic one.
+    """
+    was_clear = d2(bill.remaining_balance) == Decimal("0.00")
+    total = sum((d2(p.amount) for p in bill.payments), Decimal("0.00"))
+    net = d2(bill.net_total)
+
+    if total > net:
+        raise HTTPException(
+            400,
+            f"Deposits would total Rs {total}, which is more than the bill's net total "
+            f"of Rs {net}.",
+        )
+
+    bill.deposited_amount = total.quantize(TWO)
+    bill.remaining_balance = (net - total).quantize(TWO)
+    bill.last_modified = datetime.utcnow()
+
+    if bill.remaining_balance == 0:
+        bill.status = "closed"
+    elif was_clear:
+        bill.status = "open"
+
+
+def _find_payment(bill: Bill, payment_id: int) -> BillPayment:
+    for p in bill.payments:
+        if p.id == payment_id:
+            return p
+    raise HTTPException(404, "That deposit was not found on this bill.")
+
+
+@router.put("/{bill_id}/payments/{payment_id}")
+def update_payment(
+    bill_id: str, payment_id: int, payload: PaymentUpdate, db: Session = Depends(get_db)
+):
+    """Correct a deposit that was recorded wrongly — its amount, date or note."""
+    bill = _load_bill(db, bill_id)
+    payment = _find_payment(bill, payment_id)
+
+    amount = d2(payload.amount)
+    if amount <= 0:
+        raise HTTPException(400, "Payment amount must be more than 0.")
+
+    payment.amount = amount
+    if payload.payment_date is not None:
+        payment.payment_date = to_naive_utc(payload.payment_date)
+    payment.note = (payload.note or "").strip() or None
+
+    _recompute_from_payments(bill)
+    db.commit()
+    bill = _load_bill(db, bill_id)
+    generate_bill_pdf(bill)
+    return bill_to_dict(bill)
+
+
+@router.delete("/{bill_id}/payments/{payment_id}")
+def delete_payment(bill_id: str, payment_id: int, db: Session = Depends(get_db)):
+    """Remove a deposit that should never have been recorded."""
+    bill = _load_bill(db, bill_id)
+    payment = _find_payment(bill, payment_id)
+
+    bill.payments.remove(payment)  # cascade delete-orphan removes the row
+    db.flush()
+
+    _recompute_from_payments(bill)
     db.commit()
     bill = _load_bill(db, bill_id)
     generate_bill_pdf(bill)

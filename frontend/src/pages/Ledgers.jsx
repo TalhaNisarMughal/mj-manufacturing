@@ -1,22 +1,26 @@
-import { Package, Search, UserCog, Users } from 'lucide-react'
+import { Layers, Package, Search, UserCog, Users } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import api, { apiError, fmtDay, fmtMoney } from '../api/client'
 import PdfModal from '../components/bills/PdfModal'
+import CombinedLedger from '../components/ledgers/CombinedLedger'
 import CustomerLedger from '../components/ledgers/CustomerLedger'
 import ItemLedger from '../components/ledgers/ItemLedger'
 import LedgerFilters from '../components/ledgers/LedgerFilters'
 import LedgerPdfModal from '../components/ledgers/LedgerPdfModal'
 import SalesmanLedger from '../components/ledgers/SalesmanLedger'
+import SubjectPicker from '../components/ledgers/SubjectPicker'
 import { useToast } from '../context/ToastContext'
 
 const TABS = [
   { key: 'customer', label: 'Customer Ledger', icon: Users },
   { key: 'salesman', label: 'Salesman Ledger', icon: UserCog },
   { key: 'item', label: 'Item Ledger', icon: Package },
+  { key: 'combined', label: 'Combined Ledger', icon: Layers },
 ]
 
 const EMPTY_FILTERS = { q: '', dateFrom: '', dateTo: '', status: '', customerCode: '', salesman: '' }
+const EMPTY_SUBJECTS = { customers: [], salesmen: [], items: [] }
 
 export default function Ledgers() {
   const toast = useToast()
@@ -24,10 +28,14 @@ export default function Ledgers() {
 
   const tab = TABS.some((t) => t.key === params.get('tab')) ? params.get('tab') : 'customer'
   const selected = params.get('id') || ''
+  const isCombined = tab === 'combined'
 
   const [directory, setDirectory] = useState({ customers: [], salesmen: [], items: [] })
   const [pickerQuery, setPickerQuery] = useState('')
   const [filters, setFilters] = useState(EMPTY_FILTERS)
+  // The combined tab has no single subject, so it keeps its own multi-selection
+  // instead of the ?id= in the URL that the other three use.
+  const [subjects, setSubjects] = useState(EMPTY_SUBJECTS)
   // Held as { key, payload }: `tab` flips synchronously with the URL, so a
   // payload fetched for the previous subject would otherwise be handed to a
   // view expecting a different shape for one render, crashing it.
@@ -64,26 +72,40 @@ export default function Ledgers() {
   }, [tab, selected])
 
   // ------------------------------------------------------------ ledger load
-  const queryParams = useMemo(
-    () => ({
+  const queryParams = useMemo(() => {
+    const common = {
       date_from: filters.dateFrom || undefined,
       date_to: filters.dateTo || undefined,
       status: filters.status || undefined,
       q: filters.q || undefined,
+      tz_offset: new Date().getTimezoneOffset(),
+    }
+    if (isCombined) {
+      return {
+        ...common,
+        customer_code: subjects.customers.length ? subjects.customers : undefined,
+        salesman: subjects.salesmen.length ? subjects.salesmen : undefined,
+        barcode: subjects.items.length ? subjects.items : undefined,
+      }
+    }
+    return {
+      ...common,
       customer_code: filters.customerCode || undefined,
       salesman: tab === 'item' ? filters.salesman || undefined : undefined,
-      tz_offset: new Date().getTimezoneOffset(),
       ...(tab === 'customer' ? { code: selected } : {}),
       ...(tab === 'salesman' ? { name: selected } : {}),
       ...(tab === 'item' ? { barcode: selected } : {}),
-    }),
-    [tab, selected, filters]
-  )
+    }
+  }, [tab, selected, filters, subjects, isCombined])
 
-  const subjectKey = `${tab}|${selected}`
+  // The combined tab is always loadable — nothing selected simply means every
+  // sale — so its key folds in the selection rather than a single subject id.
+  const subjectKey = isCombined
+    ? `combined|${subjects.customers.join()}|${subjects.salesmen.join()}|${subjects.items.join()}`
+    : `${tab}|${selected}`
 
   useEffect(() => {
-    if (!selected) {
+    if (!isCombined && !selected) {
       setEntry(null)
       return
     }
@@ -165,6 +187,11 @@ export default function Ledgers() {
       title: `Item ledger — ${data?.item?.stock_name || ''}`,
       filename: `item-ledger-${selected}.pdf`,
     },
+    combined: {
+      url: '/ledgers/combined/pdf',
+      title: 'Combined ledger',
+      filename: 'combined-ledger.pdf',
+    },
   }[tab]
 
   const customerOptions = directory.customers
@@ -224,6 +251,8 @@ export default function Ledgers() {
   )
 
   const subjectNoun = { customer: 'customer', salesman: 'salesman', item: 'item' }[tab]
+  const totalPicked =
+    subjects.customers.length + subjects.salesmen.length + subjects.items.length
 
   return (
     <div className="page">
@@ -252,116 +281,206 @@ export default function Ledgers() {
         })}
       </div>
 
-      <div className="ledger-layout">
-        {/* ------------------------- picker ------------------------- */}
-        <aside className="ledger-picker card">
-          <div className="search-box search-box--block">
-            <Search size={15} />
-            <input
-              placeholder={`Search ${subjectNoun}s…`}
-              value={pickerQuery}
-              onChange={(e) => setPickerQuery(e.target.value)}
-            />
-          </div>
-          <div className="picker-list">
-            {pickerRows.length === 0 ? (
-              <p className="empty-note">No {subjectNoun}s found.</p>
-            ) : (
-              pickerRows.map((r) => (
-                <button
-                  key={r.id}
-                  className={`picker-item ${selected === r.id ? 'is-selected' : ''}`}
-                  onClick={() => go(tab, r.id)}
-                >
-                  <div className="picker-main">
-                    <div className="picker-title">{r.title}</div>
-                    <div className="picker-sub mono">{r.sub}</div>
-                    <div className="picker-meta">{r.meta}</div>
-                  </div>
-                  <div className={`picker-value mono ${r.danger ? 'amount-due' : ''}`}>{r.value}</div>
-                </button>
-              ))
-            )}
-          </div>
-        </aside>
-
-        {/* ------------------------- ledger ------------------------- */}
-        <section className="ledger-body">
-          {!selected ? (
-            <div className="card ledger-placeholder">
-              <h2>Pick a {subjectNoun} to open its ledger</h2>
+      {isCombined ? (
+        /* ----------------------- combined ----------------------- */
+        <div className="combined-layout">
+          <aside className="combined-pickers card">
+            <div className="combined-pickers-head">
+              <h2>Combine any two or three</h2>
               <p className="page-sub">
-                {tab === 'customer' &&
-                  'Every bill and every deposit in date order, with the running balance after each entry.'}
-                {tab === 'salesman' &&
-                  'What this salesman sold, to which customers, on what date, and the total sales generated.'}
-                {tab === 'item' &&
-                  'Where this item went — which customers bought it, in what quantity, and what it earned.'}
+                Pick as many of each as you like. Leaving a column empty means “all of them”.
               </p>
+              {totalPicked > 0 && (
+                <button
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => setSubjects(EMPTY_SUBJECTS)}
+                >
+                  Clear all {totalPicked}
+                </button>
+              )}
             </div>
-          ) : (
-            <>
-              <div className="card ledger-filters-card">
-                <LedgerFilters
-                  value={{
-                    ...filters,
-                    extraActive: !!(filters.customerCode || filters.salesman),
-                  }}
-                  onChange={(v) => setFilters({ ...EMPTY_FILTERS, ...v })}
-                  extra={extraFilters}
-                  searchPlaceholder={
-                    tab === 'customer'
-                      ? 'Search items, barcode, bill ID or salesman…'
-                      : tab === 'salesman'
-                        ? 'Search customer, item, barcode or bill ID…'
-                        : 'Search customer, code, phone or salesman…'
-                  }
+            <div className="combined-pickers-grid">
+              <SubjectPicker
+                title="Customers"
+                icon={Users}
+                options={directory.customers}
+                value={subjects.customers}
+                onChange={(v) => setSubjects((s) => ({ ...s, customers: v }))}
+                idKey="customer_code"
+                labelKey="customer_name"
+                subKey="customer_code"
+                placeholder="Search customers…"
+              />
+              <SubjectPicker
+                title="Salesmen"
+                icon={UserCog}
+                options={directory.salesmen}
+                value={subjects.salesmen}
+                onChange={(v) => setSubjects((s) => ({ ...s, salesmen: v }))}
+                idKey="salesman_name"
+                labelKey="salesman_name"
+                placeholder="Search salesmen…"
+              />
+              <SubjectPicker
+                title="Items"
+                icon={Package}
+                options={directory.items}
+                value={subjects.items}
+                onChange={(v) => setSubjects((s) => ({ ...s, items: v }))}
+                idKey="stock_barcode"
+                labelKey="stock_name"
+                subKey="stock_barcode"
+                placeholder="Search items…"
+              />
+            </div>
+          </aside>
+
+          <section className="ledger-body">
+            <div className="card ledger-filters-card">
+              <LedgerFilters
+                value={filters}
+                onChange={(v) => setFilters({ ...EMPTY_FILTERS, ...v })}
+                searchPlaceholder="Search customer, salesman, item, barcode or bill ID…"
+              />
+            </div>
+
+            {loading && !data ? (
+              <div className="card">
+                <p className="empty-note">Building ledger…</p>
+              </div>
+            ) : !data ? (
+              <div className="card">
+                <p className="empty-note">This ledger could not be loaded.</p>
+              </div>
+            ) : (
+              <div className={loading ? 'is-refreshing' : ''}>
+                <CombinedLedger
+                  data={data}
+                  onPrint={() => setShowPdf(true)}
+                  onOpenBill={setBillPdf}
+                  onOpenCustomer={openCustomer}
+                  onOpenSalesman={openSalesman}
+                  onOpenItem={openItem}
                 />
               </div>
-
-              {loading && !data ? (
-                <div className="card">
-                  <p className="empty-note">Building ledger…</p>
-                </div>
-              ) : !data ? (
-                <div className="card">
-                  <p className="empty-note">This ledger could not be loaded.</p>
-                </div>
+            )}
+          </section>
+        </div>
+      ) : (
+        /* ------------------- the three single-subject ledgers ------------------- */
+        <div className="ledger-layout">
+          <aside className="ledger-picker card">
+            <div className="search-box search-box--block">
+              <Search size={15} />
+              <input
+                placeholder={`Search ${subjectNoun}s…`}
+                value={pickerQuery}
+                onChange={(e) => setPickerQuery(e.target.value)}
+              />
+            </div>
+            <div className="picker-list">
+              {pickerRows.length === 0 ? (
+                <p className="empty-note">No {subjectNoun}s found.</p>
               ) : (
-                <div className={loading ? 'is-refreshing' : ''}>
-                  {tab === 'customer' && (
-                    <CustomerLedger
-                      data={data}
-                      onPrint={() => setShowPdf(true)}
-                      onOpenBill={setBillPdf}
-                      onOpenSalesman={openSalesman}
-                      onOpenItem={openItem}
-                    />
-                  )}
-                  {tab === 'salesman' && (
-                    <SalesmanLedger
-                      data={data}
-                      onPrint={() => setShowPdf(true)}
-                      onOpenBill={setBillPdf}
-                      onOpenCustomer={openCustomer}
-                      onOpenItem={openItem}
-                    />
-                  )}
-                  {tab === 'item' && (
-                    <ItemLedger
-                      data={data}
-                      onPrint={() => setShowPdf(true)}
-                      onOpenBill={setBillPdf}
-                      onOpenCustomer={openCustomer}
-                      onOpenSalesman={openSalesman}
-                    />
-                  )}
-                </div>
+                pickerRows.map((r) => (
+                  <button
+                    key={r.id}
+                    className={`picker-item ${selected === r.id ? 'is-selected' : ''}`}
+                    onClick={() => go(tab, r.id)}
+                  >
+                    <div className="picker-main">
+                      <div className="picker-title">{r.title}</div>
+                      <div className="picker-sub mono">{r.sub}</div>
+                      <div className="picker-meta">{r.meta}</div>
+                    </div>
+                    <div className={`picker-value mono ${r.danger ? 'amount-due' : ''}`}>{r.value}</div>
+                  </button>
+                ))
               )}
-            </>
-          )}
-        </section>
-      </div>
+            </div>
+          </aside>
+
+          <section className="ledger-body">
+            {!selected ? (
+              <div className="card ledger-placeholder">
+                <h2>Pick a {subjectNoun} to open its ledger</h2>
+                <p className="page-sub">
+                  {tab === 'customer' &&
+                    'Every bill and every deposit in date order, with the running balance after each entry.'}
+                  {tab === 'salesman' &&
+                    'What this salesman sold, to which customers, on what date, and the total sales generated.'}
+                  {tab === 'item' &&
+                    'Where this item went — which customers bought it, in what quantity, and what it earned.'}
+                </p>
+                <p className="page-sub">
+                  Need more than one at a time? The <b>Combined Ledger</b> tab crosses customers,
+                  salesmen and items together.
+                </p>
+              </div>
+            ) : (
+              <>
+                <div className="card ledger-filters-card">
+                  <LedgerFilters
+                    value={{
+                      ...filters,
+                      extraActive: !!(filters.customerCode || filters.salesman),
+                    }}
+                    onChange={(v) => setFilters({ ...EMPTY_FILTERS, ...v })}
+                    extra={extraFilters}
+                    searchPlaceholder={
+                      tab === 'customer'
+                        ? 'Search items, barcode, bill ID or salesman…'
+                        : tab === 'salesman'
+                          ? 'Search customer, item, barcode or bill ID…'
+                          : 'Search customer, code, phone or salesman…'
+                    }
+                  />
+                </div>
+
+                {loading && !data ? (
+                  <div className="card">
+                    <p className="empty-note">Building ledger…</p>
+                  </div>
+                ) : !data ? (
+                  <div className="card">
+                    <p className="empty-note">This ledger could not be loaded.</p>
+                  </div>
+                ) : (
+                  <div className={loading ? 'is-refreshing' : ''}>
+                    {tab === 'customer' && (
+                      <CustomerLedger
+                        data={data}
+                        onPrint={() => setShowPdf(true)}
+                        onOpenBill={setBillPdf}
+                        onOpenSalesman={openSalesman}
+                        onOpenItem={openItem}
+                      />
+                    )}
+                    {tab === 'salesman' && (
+                      <SalesmanLedger
+                        data={data}
+                        onPrint={() => setShowPdf(true)}
+                        onOpenBill={setBillPdf}
+                        onOpenCustomer={openCustomer}
+                        onOpenItem={openItem}
+                      />
+                    )}
+                    {tab === 'item' && (
+                      <ItemLedger
+                        data={data}
+                        onPrint={() => setShowPdf(true)}
+                        onOpenBill={setBillPdf}
+                        onOpenCustomer={openCustomer}
+                        onOpenSalesman={openSalesman}
+                      />
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+          </section>
+        </div>
+      )}
 
       {showPdf && data && (
         <LedgerPdfModal

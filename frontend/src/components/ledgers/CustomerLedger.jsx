@@ -1,9 +1,14 @@
 import { FileText, Printer, Receipt } from 'lucide-react'
-import { fmtDate, fmtDay, fmtMoney } from '../../api/client'
+import { fmtDate, fmtDay, fmtMoney, fmtPercent } from '../../api/client'
+import { useAuth } from '../../context/AuthContext'
 
 export default function CustomerLedger({ data, onPrint, onOpenBill, onOpenSalesman, onOpenItem }) {
+  const { isAdmin } = useAuth()
   const { customer: c, summary: s, entries, bills, top_items: topItems } = data
   const due = s.outstanding > 0
+  // The server withholds profit from a staff token entirely, so an undefined
+  // figure here means "not for this user", not "zero".
+  const showProfit = isAdmin && s.period_profit !== undefined
 
   return (
     <>
@@ -53,6 +58,15 @@ export default function CustomerLedger({ data, onPrint, onOpenBill, onOpenSalesm
             {s.all_time_bills} bill(s) · {s.open_bills} open · {s.closed_bills} closed
           </div>
         </div>
+        {showProfit && (
+          <div className={`stat-card ${s.period_profit < 0 ? 'stat-card--amber' : 'stat-card--profit'}`}>
+            <div className="stat-label">Profit in period</div>
+            <div className="stat-value">{fmtMoney(s.period_profit)}</div>
+            <div className="stat-sub">
+              {fmtPercent(s.period_margin)} margin · {fmtMoney(s.all_time_profit)} all time
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ---------------- running account ---------------- */}
@@ -76,6 +90,7 @@ export default function CustomerLedger({ data, onPrint, onOpenBill, onOpenSalesm
                 <th className="th-num">Qty</th>
                 <th className="th-num">Debit</th>
                 <th className="th-num">Credit</th>
+                {showProfit && <th className="th-num">Profit</th>}
                 <th className="th-num">Balance</th>
               </tr>
             </thead>
@@ -85,11 +100,14 @@ export default function CustomerLedger({ data, onPrint, onOpenBill, onOpenSalesm
                 <td className="td-strong">Opening balance</td>
                 <td colSpan={4} />
                 <td />
+                {showProfit && <td />}
                 <td className="td-num mono td-strong">{fmtMoney(data.opening_balance)}</td>
               </tr>
               {entries.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="empty-cell">No ledger activity for these filters.</td>
+                  <td colSpan={showProfit ? 9 : 8} className="empty-cell">
+                    No ledger activity for these filters.
+                  </td>
                 </tr>
               ) : (
                 entries.map((e, i) => (
@@ -116,6 +134,16 @@ export default function CustomerLedger({ data, onPrint, onOpenBill, onOpenSalesm
                     <td className="td-num mono amount-clear">
                       {e.credit ? fmtMoney(e.credit) : '—'}
                     </td>
+                    {showProfit && (
+                      <td
+                        className={`td-num mono ${
+                          e.profit == null ? 'td-muted' : e.profit < 0 ? 'amount-due' : 'amount-profit'
+                        }`}
+                      >
+                        {/* a payment moves money, it does not earn any */}
+                        {e.profit == null ? '—' : fmtMoney(e.profit)}
+                      </td>
+                    )}
                     <td className="td-num mono td-strong">{fmtMoney(e.balance)}</td>
                   </tr>
                 ))
@@ -125,6 +153,7 @@ export default function CustomerLedger({ data, onPrint, onOpenBill, onOpenSalesm
                 <td className="td-num mono">{s.period_units}</td>
                 <td className="td-num mono">{fmtMoney(s.period_billed)}</td>
                 <td className="td-num mono">{fmtMoney(s.period_paid)}</td>
+                {showProfit && <td className="td-num mono">{fmtMoney(s.period_profit)}</td>}
                 <td className={`td-num mono ${due ? 'amount-due' : 'amount-clear'}`}>
                   {fmtMoney(s.outstanding)}
                 </td>
@@ -163,6 +192,11 @@ export default function CustomerLedger({ data, onPrint, onOpenBill, onOpenSalesm
                   <span className={b.remaining_balance > 0 ? 'amount-due' : 'amount-clear'}>
                     Due {fmtMoney(b.remaining_balance)}
                   </span>
+                  {showProfit && (
+                    <span className={b.profit < 0 ? 'amount-due' : 'amount-profit'}>
+                      Profit {fmtMoney(b.profit)}
+                    </span>
+                  )}
                   <span className={`status-chip status-chip--${b.status}`}>
                     {b.status === 'open' ? 'Open' : 'Closed'}
                   </span>
@@ -180,6 +214,7 @@ export default function CustomerLedger({ data, onPrint, onOpenBill, onOpenSalesm
                       <th className="th-num">Disc. Price</th>
                       <th className="th-num">Disc %</th>
                       <th className="th-num">Line Total</th>
+                      {showProfit && <th className="th-num">Profit</th>}
                     </tr>
                   </thead>
                   <tbody>
@@ -199,6 +234,11 @@ export default function CustomerLedger({ data, onPrint, onOpenBill, onOpenSalesm
                         </td>
                         <td className="td-num mono">{Number(it.discount_percent || 0).toFixed(2)}%</td>
                         <td className="td-num mono td-strong">{fmtMoney(it.line_total)}</td>
+                        {showProfit && (
+                          <td className={`td-num mono ${it.profit < 0 ? 'amount-due' : 'amount-profit'}`}>
+                            {fmtMoney(it.profit)}
+                          </td>
+                        )}
                       </tr>
                     ))}
                   </tbody>
@@ -225,6 +265,7 @@ export default function CustomerLedger({ data, onPrint, onOpenBill, onOpenSalesm
                   <th className="th-num">Total Qty</th>
                   <th className="th-num">Times Bought</th>
                   <th className="th-num">Amount</th>
+                  {showProfit && <th className="th-num">Profit</th>}
                   <th />
                 </tr>
               </thead>
@@ -236,6 +277,11 @@ export default function CustomerLedger({ data, onPrint, onOpenBill, onOpenSalesm
                     <td className="td-num mono">{t.qty}</td>
                     <td className="td-num mono">{t.bills}</td>
                     <td className="td-num mono td-strong">{fmtMoney(t.amount)}</td>
+                    {showProfit && (
+                      <td className={`td-num mono ${t.profit < 0 ? 'amount-due' : 'amount-profit'}`}>
+                        {fmtMoney(t.profit)}
+                      </td>
+                    )}
                     <td className="td-actions">
                       <button
                         className="icon-btn"
@@ -254,6 +300,11 @@ export default function CustomerLedger({ data, onPrint, onOpenBill, onOpenSalesm
                   <td className="td-num mono">
                     {fmtMoney(topItems.reduce((a, t) => a + t.amount, 0))}
                   </td>
+                  {showProfit && (
+                    <td className="td-num mono">
+                      {fmtMoney(topItems.reduce((a, t) => a + (t.profit || 0), 0))}
+                    </td>
+                  )}
                   <td />
                 </tr>
               </tbody>

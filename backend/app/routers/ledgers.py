@@ -1,6 +1,6 @@
-"""Customer / Salesman / Item ledgers.
+"""Customer / Salesman / Item / Combined ledgers.
 
-Three read-only analytical views over the same bill data:
+Four read-only analytical views over the same bill data:
 
 * **Customer ledger** — a true running account. Bills are debits, payments are
   credits, merged into one chronological timeline so every row carries the
@@ -11,11 +11,20 @@ Three read-only analytical views over the same bill data:
   generated. Grouped by customer and by item, with links back to each bill.
 * **Item ledger** — where one stock item went: which customers bought it, in
   what quantity, on what date, and what it earned.
+* **Combined ledger** — the same sales data sliced by any mix of customers,
+  salesmen and items at once, for the questions a single-subject ledger cannot
+  answer ("which items did this salesman sell to these two customers?"). All
+  eight combinations, including none selected, are one query.
 
 Money note: payments are recorded per *bill*, not per line item. So the
 paid/outstanding figures on an item or salesman line are the line's
 proportional share of its bill (line_total / bill_net), labelled in the UI as
 an allocated share rather than a tracked fact.
+
+Profit note: profit is admin-only. Every builder takes `include_profit`, and
+when it is False the keys are never added to the payload at all rather than
+being blanked — a staff login receives no figure to work backwards from. Cost
+itself is never serialised anywhere.
 """
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -27,8 +36,14 @@ from sqlalchemy.orm import Session, joinedload
 
 from ..core.deps import get_current_user
 from ..database import get_db
-from ..models import Bill, BillItem, Customer, Stock
-from ..utils.ledger_pdf import customer_ledger_pdf, item_ledger_pdf, salesman_ledger_pdf
+from ..models import Bill, BillItem, Customer, Stock, User
+from ..utils.ledger_pdf import (
+    combined_ledger_pdf,
+    customer_ledger_pdf,
+    item_ledger_pdf,
+    salesman_ledger_pdf,
+)
+from ..utils.profit import line_profit, margin_percent
 from ..utils.serialize import f2, iso
 
 router = APIRouter(
@@ -41,6 +56,11 @@ ZERO = Decimal("0.00")
 
 def d2(x) -> Decimal:
     return Decimal(str(x or 0)).quantize(TWO)
+
+
+def wants_profit(user: User) -> bool:
+    """Profit (and so, by inference, cost) is for the admin only."""
+    return user.role == "admin"
 
 
 # ------------------------------------------------------------------ filters
@@ -75,9 +95,10 @@ def in_window(dt: datetime, start: datetime | None, end: datetime | None) -> boo
     return True
 
 
-def _item_dicts(bill: Bill) -> list[dict]:
-    return [
-        {
+def _item_dicts(bill: Bill, include_profit: bool = False) -> list[dict]:
+    out = []
+    for it in bill.items:
+        row = {
             "stock_barcode": it.stock_barcode,
             "item_name": it.item_name,
             "description": it.description,
@@ -87,11 +108,15 @@ def _item_dicts(bill: Bill) -> list[dict]:
             "qty": it.qty,
             "line_total": f2(it.line_total),
         }
-        for it in bill.items
-    ]
+        if include_profit:
+            row["profit"] = f2(line_profit(it))
+        out.append(row)
+    return out
 
 
-def _bill_row(bill: Bill, customer: Customer | None = None) -> dict:
+def _bill_row(
+    bill: Bill, customer: Customer | None = None, include_profit: bool = False
+) -> dict:
     c = customer if customer is not None else bill.customer
     return {
         "bill_id": bill.bill_id,
@@ -108,7 +133,12 @@ def _bill_row(bill: Bill, customer: Customer | None = None) -> dict:
         "deposited_amount": f2(bill.deposited_amount),
         "remaining_balance": f2(bill.remaining_balance),
         "units": sum(it.qty for it in bill.items),
-        "items": _item_dicts(bill),
+        "items": _item_dicts(bill, include_profit),
+        **(
+            {"profit": f2(sum((line_profit(it) for it in bill.items), ZERO))}
+            if include_profit
+            else {}
+        ),
     }
 
 
@@ -259,6 +289,7 @@ def build_customer_ledger(
     status: str | None,
     q: str | None,
     tz_offset: int,
+    include_profit: bool = False,
 ) -> dict:
     customer = db.get(Customer, code)
     if not customer:
@@ -297,7 +328,12 @@ def build_customer_ledger(
                 "debit": f2(b.net_total),
                 "credit": 0.0,
                 "note": None,
-                "items": _item_dicts(b),
+                **(
+                    {"profit": f2(sum((line_profit(it) for it in b.items), ZERO))}
+                    if include_profit
+                    else {}
+                ),
+                "items": _item_dicts(b, include_profit),
                 "bill_net_total": f2(b.net_total),
                 "bill_deposited": f2(b.deposited_amount),
                 "bill_remaining": f2(b.remaining_balance),
@@ -320,6 +356,7 @@ def build_customer_ledger(
                     "debit": 0.0,
                     "credit": f2(p.amount),
                     "note": p.note,
+                    **({"profit": None} if include_profit else {}),
                     "items": [],
                     "bill_net_total": f2(b.net_total),
                     "bill_deposited": f2(b.deposited_amount),
@@ -366,6 +403,10 @@ def build_customer_ledger(
     period_billed = sum((d2(e["debit"]) for e in rows), ZERO)
     period_paid = sum((d2(e["credit"]) for e in rows), ZERO)
     bill_rows = [e for e in rows if e["kind"] == "bill"]
+    period_profit = sum((d2(e.get("profit")) for e in bill_rows), ZERO)
+    all_time_profit = sum(
+        (line_profit(it) for b in bills for it in b.items), ZERO
+    )
 
     # Per-item totals inside the window
     item_totals: dict[str, dict] = {}
@@ -384,9 +425,15 @@ def build_customer_ledger(
             t["qty"] += it["qty"]
             t["amount"] += d2(it["line_total"])
             t["bills"] += 1
+            if include_profit:
+                t["profit"] = t.get("profit", ZERO) + d2(it.get("profit"))
     top_items = sorted(
         (
-            {**t, "amount": f2(t["amount"])}
+            {
+                **t,
+                "amount": f2(t["amount"]),
+                **({"profit": f2(t.get("profit", ZERO))} if include_profit else {}),
+            }
             for t in item_totals.values()
         ),
         key=lambda t: t["qty"],
@@ -394,7 +441,7 @@ def build_customer_ledger(
     )
 
     # Bills shown in the detail table (same window + filters as the timeline)
-    shown_bills = [_bill_row(e["_bill"], customer) for e in bill_rows]
+    shown_bills = [_bill_row(e["_bill"], customer, include_profit) for e in bill_rows]
 
     all_time_billed = sum((d2(b.net_total) for b in bills), ZERO)
     all_time_paid = sum((d2(b.deposited_amount) for b in bills), ZERO)
@@ -435,6 +482,16 @@ def build_customer_ledger(
             "closed_bills": sum(1 for b in bills if b.status == "closed"),
             "first_purchase": iso(bills[0].purchase_date) if bills else None,
             "last_purchase": iso(bills[-1].purchase_date) if bills else None,
+            **(
+                {
+                    "period_profit": f2(period_profit),
+                    "period_margin": margin_percent(period_profit, period_billed),
+                    "all_time_profit": f2(all_time_profit),
+                    "all_time_margin": margin_percent(all_time_profit, all_time_billed),
+                }
+                if include_profit
+                else {}
+            ),
         },
         "entries": rows,
         "bills": shown_bills,
@@ -451,8 +508,11 @@ def customer_ledger(
     q: str | None = None,
     tz_offset: int = Query(0),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
-    return build_customer_ledger(db, code, date_from, date_to, status, q, tz_offset)
+    return build_customer_ledger(
+        db, code, date_from, date_to, status, q, tz_offset, wants_profit(user)
+    )
 
 
 # --------------------------------------------------------- salesman ledger
@@ -465,6 +525,7 @@ def build_salesman_ledger(
     customer_code: str | None,
     q: str | None,
     tz_offset: int,
+    include_profit: bool = False,
 ) -> dict:
     key = (name or "").strip().lower()
     if not key:
@@ -510,6 +571,7 @@ def build_salesman_ledger(
     total_collected = sum((d2(b.deposited_amount) for b in bills), ZERO)
     outstanding = sum((d2(b.remaining_balance) for b in bills), ZERO)
     units = sum(sum(it.qty for it in b.items) for b in bills)
+    total_profit = sum((line_profit(it) for b in bills for it in b.items), ZERO)
 
     # --- per customer ---
     by_customer: dict[str, dict] = {}
@@ -529,6 +591,7 @@ def build_salesman_ledger(
                 "outstanding": ZERO,
                 "last_purchase": None,
                 "bill_ids": [],
+                "profit": ZERO,
             },
         )
         row["bills"] += 1
@@ -537,17 +600,26 @@ def build_salesman_ledger(
         row["collected"] += d2(b.deposited_amount)
         row["outstanding"] += d2(b.remaining_balance)
         row["bill_ids"].append(b.bill_id)
+        row["profit"] += sum((line_profit(it) for it in b.items), ZERO)
         if row["last_purchase"] is None or b.purchase_date > row["last_purchase"]:
             row["last_purchase"] = b.purchase_date
 
     customers_out = sorted(
         (
             {
-                **r,
+                **{k: v for k, v in r.items() if k != "profit"},
                 "billed": f2(r["billed"]),
                 "collected": f2(r["collected"]),
                 "outstanding": f2(r["outstanding"]),
                 "last_purchase": iso(r["last_purchase"]),
+                **(
+                    {
+                        "profit": f2(r["profit"]),
+                        "margin": margin_percent(r["profit"], r["billed"]),
+                    }
+                    if include_profit
+                    else {}
+                ),
             }
             for r in by_customer.values()
         ),
@@ -568,12 +640,14 @@ def build_salesman_ledger(
                     "amount": ZERO,
                     "bills": 0,
                     "customers": set(),
+                    "profit": ZERO,
                 },
             )
             row["qty"] += it.qty
             row["amount"] += d2(it.line_total)
             row["bills"] += 1
             row["customers"].add(b.customer_code)
+            row["profit"] += line_profit(it)
     items_out = sorted(
         (
             {
@@ -583,6 +657,14 @@ def build_salesman_ledger(
                 "amount": f2(r["amount"]),
                 "bills": r["bills"],
                 "customers": len(r["customers"]),
+                **(
+                    {
+                        "profit": f2(r["profit"]),
+                        "margin": margin_percent(r["profit"], r["amount"]),
+                    }
+                    if include_profit
+                    else {}
+                ),
             }
             for r in by_item.values()
         ),
@@ -621,6 +703,7 @@ def build_salesman_ledger(
                     "share_outstanding": f2(
                         _share(line_total, bill_net, d2(b.remaining_balance))
                     ),
+                    **({"profit": f2(line_profit(it))} if include_profit else {}),
                 }
             )
 
@@ -646,8 +729,16 @@ def build_salesman_ledger(
             "closed_bills": sum(1 for b in bills if b.status == "closed"),
             "first_sale": iso(min(b.purchase_date for b in bills)) if bills else None,
             "last_sale": iso(max(b.purchase_date for b in bills)) if bills else None,
+            **(
+                {
+                    "profit": f2(total_profit),
+                    "margin": margin_percent(total_profit, total_billed),
+                }
+                if include_profit
+                else {}
+            ),
         },
-        "bills": [_bill_row(b) for b in bills],
+        "bills": [_bill_row(b, include_profit=include_profit) for b in bills],
         "by_customer": customers_out,
         "by_item": items_out,
         "lines": lines,
@@ -664,9 +755,10 @@ def salesman_ledger(
     q: str | None = None,
     tz_offset: int = Query(0),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     return build_salesman_ledger(
-        db, name, date_from, date_to, status, customer_code, q, tz_offset
+        db, name, date_from, date_to, status, customer_code, q, tz_offset, wants_profit(user)
     )
 
 
@@ -681,6 +773,7 @@ def build_item_ledger(
     salesman: str | None,
     q: str | None,
     tz_offset: int,
+    include_profit: bool = False,
 ) -> dict:
     stock = db.get(Stock, barcode)
     start, end = parse_window(date_from, date_to, tz_offset)
@@ -735,6 +828,7 @@ def build_item_ledger(
     collected = ZERO
     outstanding = ZERO
     price_weighted = ZERO
+    total_profit = ZERO
     for r in rows:
         it, b, c = r.BillItem, r.Bill, r.Customer
         bill_net = d2(b.net_total)
@@ -746,6 +840,7 @@ def build_item_ledger(
         collected += paid_share
         outstanding += due_share
         price_weighted += line_total
+        total_profit += line_profit(it)
         lines.append(
             {
                 "date": iso(b.purchase_date),
@@ -769,6 +864,7 @@ def build_item_ledger(
                 "bill_remaining": f2(b.remaining_balance),
                 "share_paid": f2(paid_share),
                 "share_outstanding": f2(due_share),
+                **({"profit": f2(line_profit(it))} if include_profit else {}),
             }
         )
 
@@ -790,12 +886,14 @@ def build_item_ledger(
                 "share_outstanding": ZERO,
                 "last_purchase": None,
                 "salesmen": set(),
+                "profit": ZERO,
             },
         )
         bill_net = d2(b.net_total)
         line_total = d2(it.line_total)
         row["qty"] += it.qty
         row["amount"] += line_total
+        row["profit"] += line_profit(it)
         row["bills"] += 1
         row["share_paid"] += _share(line_total, bill_net, d2(b.deposited_amount))
         row["share_outstanding"] += _share(line_total, bill_net, d2(b.remaining_balance))
@@ -817,6 +915,14 @@ def build_item_ledger(
                 "share_outstanding": f2(r["share_outstanding"]),
                 "last_purchase": iso(r["last_purchase"]),
                 "salesmen": sorted(s for s in r["salesmen"] if s),
+                **(
+                    {
+                        "profit": f2(r["profit"]),
+                        "margin": margin_percent(r["profit"], r["amount"]),
+                    }
+                    if include_profit
+                    else {}
+                ),
             }
             for r in by_customer.values()
         ),
@@ -837,12 +943,14 @@ def build_item_ledger(
                 "amount": ZERO,
                 "bills": 0,
                 "customers": set(),
+                "profit": ZERO,
             },
         )
         row["qty"] += it.qty
         row["amount"] += d2(it.line_total)
         row["bills"] += 1
         row["customers"].add(b.customer_code)
+        row["profit"] += line_profit(it)
     salesmen_out = sorted(
         (
             {
@@ -851,6 +959,14 @@ def build_item_ledger(
                 "amount": f2(r["amount"]),
                 "bills": r["bills"],
                 "customers": len(r["customers"]),
+                **(
+                    {
+                        "profit": f2(r["profit"]),
+                        "margin": margin_percent(r["profit"], r["amount"]),
+                    }
+                    if include_profit
+                    else {}
+                ),
             }
             for r in by_salesman.values()
         ),
@@ -865,12 +981,25 @@ def build_item_ledger(
         local = b.purchase_date - timedelta(minutes=tz_offset)
         mk = local.strftime("%Y-%m")
         row = monthly.setdefault(
-            mk, {"month": mk, "label": local.strftime("%b %Y"), "qty": 0, "amount": ZERO}
+            mk,
+            {
+                "month": mk,
+                "label": local.strftime("%b %Y"),
+                "qty": 0,
+                "amount": ZERO,
+                "profit": ZERO,
+            },
         )
         row["qty"] += it.qty
         row["amount"] += d2(it.line_total)
+        row["profit"] += line_profit(it)
     monthly_out = [
-        {**r, "amount": f2(r["amount"])} for r in sorted(monthly.values(), key=lambda r: r["month"])
+        {
+            **{k: v for k, v in r.items() if k != "profit"},
+            "amount": f2(r["amount"]),
+            **({"profit": f2(r["profit"])} if include_profit else {}),
+        }
+        for r in sorted(monthly.values(), key=lambda r: r["month"])
     ]
 
     return {
@@ -907,6 +1036,14 @@ def build_item_ledger(
             "last_sale": iso(max((r.Bill.purchase_date for r in rows), default=None))
             if rows
             else None,
+            **(
+                {
+                    "profit": f2(total_profit),
+                    "margin": margin_percent(total_profit, revenue),
+                }
+                if include_profit
+                else {}
+            ),
         },
         "lines": lines,
         "by_customer": customers_out,
@@ -926,9 +1063,360 @@ def item_ledger(
     q: str | None = None,
     tz_offset: int = Query(0),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     return build_item_ledger(
-        db, barcode, date_from, date_to, status, customer_code, salesman, q, tz_offset
+        db,
+        barcode,
+        date_from,
+        date_to,
+        status,
+        customer_code,
+        salesman,
+        q,
+        tz_offset,
+        wants_profit(user),
+    )
+
+
+# --------------------------------------------------------- combined ledger
+def build_combined_ledger(
+    db: Session,
+    customer_codes: list[str] | None,
+    salesmen: list[str] | None,
+    barcodes: list[str] | None,
+    date_from: str | None,
+    date_to: str | None,
+    status: str | None,
+    q: str | None,
+    tz_offset: int,
+    include_profit: bool = False,
+) -> dict:
+    """Sales lines filtered by any mix of customers, salesmen and items.
+
+    Each of the three dimensions is an optional list, so "this salesman" and
+    "these two salesmen across these three items" are the same code path, and
+    so is selecting nothing at all (every sale in the business). That is why
+    there is one endpoint here rather than eight.
+
+    What it deliberately does not have is a running balance. Payments are
+    recorded against a whole bill, so once the data is sliced by item there is
+    no honest per-line balance to carry forward — the customer ledger remains
+    the place for "what does this account owe me".
+    """
+    start, end = parse_window(date_from, date_to, tz_offset)
+
+    customer_codes = [c for c in (customer_codes or []) if c and c.strip()]
+    salesmen = [s.strip() for s in (salesmen or []) if s and s.strip()]
+    barcodes = [b for b in (barcodes or []) if b and b.strip()]
+
+    query = (
+        db.query(BillItem, Bill, Customer)
+        .join(Bill, BillItem.bill_id == Bill.bill_id)
+        .outerjoin(Customer, Bill.customer_code == Customer.customer_code)
+    )
+    if customer_codes:
+        query = query.filter(Bill.customer_code.in_(customer_codes))
+    if salesmen:
+        query = query.filter(
+            func.lower(func.trim(Bill.salesman_name)).in_([s.lower() for s in salesmen])
+        )
+    if barcodes:
+        query = query.filter(BillItem.stock_barcode.in_(barcodes))
+    if start:
+        query = query.filter(Bill.purchase_date >= start)
+    if end:
+        query = query.filter(Bill.purchase_date < end)
+    if status:
+        query = query.filter(Bill.status == status)
+
+    rows = query.order_by(Bill.purchase_date.desc()).all()
+
+    needle = (q or "").strip().lower()
+    if needle:
+        rows = [
+            r
+            for r in rows
+            if needle
+            in " ".join(
+                [
+                    r.Bill.bill_id,
+                    r.Bill.customer_code,
+                    r.Customer.customer_name if r.Customer else "",
+                    r.Customer.shop_name or "" if r.Customer else "",
+                    r.Customer.phone_number or "" if r.Customer else "",
+                    r.Bill.salesman_name or "",
+                    r.BillItem.item_name or "",
+                    r.BillItem.stock_barcode or "",
+                ]
+            ).lower()
+        ]
+
+    # ---------------------------------------------------------------- lines
+    lines = []
+    units = 0
+    revenue = ZERO
+    collected = ZERO
+    outstanding = ZERO
+    total_profit = ZERO
+
+    for r in rows:
+        it, b, c = r.BillItem, r.Bill, r.Customer
+        bill_net = d2(b.net_total)
+        line_total = d2(it.line_total)
+        paid_share = _share(line_total, bill_net, d2(b.deposited_amount))
+        due_share = _share(line_total, bill_net, d2(b.remaining_balance))
+
+        units += it.qty
+        revenue += line_total
+        collected += paid_share
+        outstanding += due_share
+        total_profit += line_profit(it)
+
+        lines.append(
+            {
+                "date": iso(b.purchase_date),
+                "bill_id": b.bill_id,
+                "customer_code": b.customer_code,
+                "customer_name": c.customer_name if c else b.customer_code,
+                "phone_number": c.phone_number if c else None,
+                "shop_name": c.shop_name if c else None,
+                "salesman_name": b.salesman_name,
+                "stock_barcode": it.stock_barcode,
+                "item_name": it.item_name,
+                "description": it.description,
+                "qty": it.qty,
+                "unit_price": f2(it.unit_price),
+                "discounted_price": f2(it.discounted_price),
+                "discount_percent": f2(it.discount_percent),
+                "line_total": f2(line_total),
+                "payment_type": b.payment_type,
+                "status": b.status,
+                "bill_net_total": f2(bill_net),
+                "share_paid": f2(paid_share),
+                "share_outstanding": f2(due_share),
+                **({"profit": f2(line_profit(it))} if include_profit else {}),
+            }
+        )
+
+    # ------------------------------------------------------------- roll-ups
+    def _roll(key_fn, seed_fn) -> list[dict]:
+        """Group the matched lines by one dimension. Every roll-up is returned
+        whether or not that dimension was pinned — a pinned multi-select still
+        wants the breakdown, and the UI hides the single-row case."""
+        acc: dict = {}
+        for r in rows:
+            it, b, c = r.BillItem, r.Bill, r.Customer
+            k = key_fn(it, b, c)
+            if k is None:
+                continue
+            row = acc.get(k)
+            if row is None:
+                row = acc[k] = {
+                    **seed_fn(it, b, c),
+                    "qty": 0,
+                    "amount": ZERO,
+                    "bills": set(),
+                    "profit": ZERO,
+                    "share_paid": ZERO,
+                    "share_outstanding": ZERO,
+                    "last_date": None,
+                }
+            bill_net = d2(b.net_total)
+            line_total = d2(it.line_total)
+            row["qty"] += it.qty
+            row["amount"] += line_total
+            row["bills"].add(b.bill_id)
+            row["profit"] += line_profit(it)
+            row["share_paid"] += _share(line_total, bill_net, d2(b.deposited_amount))
+            row["share_outstanding"] += _share(line_total, bill_net, d2(b.remaining_balance))
+            if row["last_date"] is None or b.purchase_date > row["last_date"]:
+                row["last_date"] = b.purchase_date
+
+        out = []
+        for row in acc.values():
+            out.append(
+                {
+                    **{
+                        k: v
+                        for k, v in row.items()
+                        if k not in {"bills", "profit", "amount", "share_paid",
+                                     "share_outstanding", "last_date"}
+                    },
+                    "amount": f2(row["amount"]),
+                    "bills": len(row["bills"]),
+                    "share_paid": f2(row["share_paid"]),
+                    "share_outstanding": f2(row["share_outstanding"]),
+                    "last_date": iso(row["last_date"]),
+                    **(
+                        {
+                            "profit": f2(row["profit"]),
+                            "margin": margin_percent(row["profit"], row["amount"]),
+                        }
+                        if include_profit
+                        else {}
+                    ),
+                }
+            )
+        return sorted(out, key=lambda r: r["amount"], reverse=True)
+
+    by_customer = _roll(
+        lambda it, b, c: b.customer_code,
+        lambda it, b, c: {
+            "customer_code": b.customer_code,
+            "customer_name": c.customer_name if c else b.customer_code,
+            "phone_number": c.phone_number if c else None,
+            "shop_name": c.shop_name if c else None,
+        },
+    )
+    by_salesman = _roll(
+        lambda it, b, c: (b.salesman_name or "").strip().lower() or None,
+        lambda it, b, c: {"salesman_name": (b.salesman_name or "").strip()},
+    )
+    by_item = _roll(
+        lambda it, b, c: it.stock_barcode,
+        lambda it, b, c: {"stock_barcode": it.stock_barcode, "item_name": it.item_name},
+    )
+
+    # Customer x item x salesman, the cross-tab the single-subject ledgers
+    # cannot produce: one row per unique combination actually sold.
+    by_combination = _roll(
+        lambda it, b, c: (
+            b.customer_code,
+            (b.salesman_name or "").strip().lower(),
+            it.stock_barcode,
+        ),
+        lambda it, b, c: {
+            "customer_code": b.customer_code,
+            "customer_name": c.customer_name if c else b.customer_code,
+            "salesman_name": (b.salesman_name or "").strip(),
+            "stock_barcode": it.stock_barcode,
+            "item_name": it.item_name,
+        },
+    )
+
+    # --- month by month ---
+    monthly: dict[str, dict] = {}
+    for r in rows:
+        it, b = r.BillItem, r.Bill
+        local = b.purchase_date - timedelta(minutes=tz_offset)
+        mk = local.strftime("%Y-%m")
+        row = monthly.setdefault(
+            mk,
+            {
+                "month": mk,
+                "label": local.strftime("%b %Y"),
+                "qty": 0,
+                "amount": ZERO,
+                "profit": ZERO,
+            },
+        )
+        row["qty"] += it.qty
+        row["amount"] += d2(it.line_total)
+        row["profit"] += line_profit(it)
+    monthly_out = [
+        {
+            **{k: v for k, v in r.items() if k != "profit"},
+            "amount": f2(r["amount"]),
+            **({"profit": f2(r["profit"])} if include_profit else {}),
+        }
+        for r in sorted(monthly.values(), key=lambda r: r["month"])
+    ]
+
+    # --------------------------------------------------------- display names
+    name_of_customer = {
+        c.customer_code: c.customer_name
+        for c in db.query(Customer).filter(Customer.customer_code.in_(customer_codes)).all()
+    } if customer_codes else {}
+    name_of_item = {
+        s.stock_barcode: s.stock_name
+        for s in db.query(Stock).filter(Stock.stock_barcode.in_(barcodes)).all()
+    } if barcodes else {}
+
+    bill_ids = {r.Bill.bill_id for r in rows}
+
+    return {
+        "subjects": {
+            "customers": [
+                {"customer_code": code, "customer_name": name_of_customer.get(code, code)}
+                for code in customer_codes
+            ],
+            "salesmen": [{"salesman_name": n} for n in salesmen],
+            "items": [
+                {"stock_barcode": bc, "stock_name": name_of_item.get(bc, bc)}
+                for bc in barcodes
+            ],
+        },
+        "filters": {
+            "date_from": date_from,
+            "date_to": date_to,
+            "status": status,
+            "q": q,
+            "customer_code": ", ".join(customer_codes) or None,
+            "salesman": ", ".join(salesmen) or None,
+            "barcode": ", ".join(barcodes) or None,
+        },
+        "summary": {
+            "lines": len(lines),
+            "bills": len(bill_ids),
+            "units": units,
+            "customers": len(by_customer),
+            "salesmen": len(by_salesman),
+            "items": len(by_item),
+            "revenue": f2(revenue),
+            "share_paid": f2(collected),
+            "share_outstanding": f2(outstanding),
+            "avg_unit_price": f2(revenue / units) if units else 0.0,
+            "open_bills": len({r.Bill.bill_id for r in rows if r.Bill.status == "open"}),
+            "closed_bills": len({r.Bill.bill_id for r in rows if r.Bill.status == "closed"}),
+            "first_sale": iso(min((r.Bill.purchase_date for r in rows), default=None))
+            if rows
+            else None,
+            "last_sale": iso(max((r.Bill.purchase_date for r in rows), default=None))
+            if rows
+            else None,
+            **(
+                {
+                    "profit": f2(total_profit),
+                    "margin": margin_percent(total_profit, revenue),
+                }
+                if include_profit
+                else {}
+            ),
+        },
+        "lines": lines,
+        "by_customer": by_customer,
+        "by_salesman": by_salesman,
+        "by_item": by_item,
+        "by_combination": by_combination,
+        "monthly": monthly_out,
+    }
+
+
+@router.get("/combined")
+def combined_ledger(
+    customer_code: list[str] | None = Query(None, description="Repeatable"),
+    salesman: list[str] | None = Query(None, description="Repeatable"),
+    barcode: list[str] | None = Query(None, description="Repeatable"),
+    date_from: str | None = Query(None, description="YYYY-MM-DD (local)"),
+    date_to: str | None = Query(None, description="YYYY-MM-DD (local)"),
+    status: str | None = Query(None, pattern="^(open|closed)$"),
+    q: str | None = None,
+    tz_offset: int = Query(0),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    return build_combined_ledger(
+        db,
+        customer_code,
+        salesman,
+        barcode,
+        date_from,
+        date_to,
+        status,
+        q,
+        tz_offset,
+        wants_profit(user),
     )
 
 
@@ -1005,3 +1493,23 @@ def item_ledger_pdf_view(
     return _pdf_response(
         item_ledger_pdf(data), f"item-ledger-{_slug(data['item']['stock_barcode'])}.pdf"
     )
+
+
+@router.get("/combined/pdf")
+def combined_ledger_pdf_view(
+    customer_code: list[str] | None = Query(None),
+    salesman: list[str] | None = Query(None),
+    barcode: list[str] | None = Query(None),
+    date_from: str | None = None,
+    date_to: str | None = None,
+    status: str | None = Query(None, pattern="^(open|closed)$"),
+    q: str | None = None,
+    tz_offset: int = Query(0),
+    db: Session = Depends(get_db),
+):
+    # include_profit stays False: a printed report can be handed to a customer
+    # or a salesman, so profit is a screen-only figure.
+    data = build_combined_ledger(
+        db, customer_code, salesman, barcode, date_from, date_to, status, q, tz_offset
+    )
+    return _pdf_response(combined_ledger_pdf(data), "combined-ledger.pdf")

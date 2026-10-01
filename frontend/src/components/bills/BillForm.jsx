@@ -1,7 +1,8 @@
 import { Plus, Trash2 } from 'lucide-react'
 import { useMemo, useState } from 'react'
-import api, { apiError, fmtMoney } from '../../api/client'
+import api, { apiError, fmtMoney, nowLocalInput, toInstant, toLocalInput } from '../../api/client'
 import { useToast } from '../../context/ToastContext'
+import DateTimeField from '../DateTimeField'
 
 const PAYMENT_TYPES = ['Debit', 'Credit', 'Cash', 'Cheque']
 const emptyItem = () => ({ stock_barcode: '', description: '', unit_price: '', discounted_price: '', qty: '1' })
@@ -18,6 +19,12 @@ export default function BillForm({ bill, stock, customers, onSaved, onCancel }) 
   const [salesman, setSalesman] = useState(bill?.salesman_name || '')
   const [paymentType, setPaymentType] = useState(bill?.payment_type || 'Credit')
   const [deposited, setDeposited] = useState('0')
+  // The purchase date is the user's to choose. It defaults to now, so the
+  // ordinary same-day bill needs no thought; a bill written up after the fact
+  // is backdated here and lands in the right month everywhere downstream.
+  const [purchaseDate, setPurchaseDate] = useState(
+    bill ? toLocalInput(bill.purchase_date) : nowLocalInput()
+  )
   const [items, setItems] = useState(
     bill
       ? bill.items.map((it) => ({
@@ -100,6 +107,7 @@ export default function BillForm({ bill, stock, customers, onSaved, onCancel }) 
       else if (!newCustomer.phone_number.trim()) fe.customer = 'New customer needs a phone number.'
     }
     if (!salesman.trim()) fe.salesman = 'Salesman name is required.'
+    if (!purchaseDate) fe.purchaseDate = 'Pick the date of this sale.'
     if (items.length === 0) fe.items = 'Add at least one item.'
 
     const chosen = new Set()
@@ -160,6 +168,7 @@ export default function BillForm({ bill, stock, customers, onSaved, onCancel }) 
           salesman_name: salesman,
           payment_type: paymentType,
           items: itemsPayload,
+          purchase_date: toInstant(purchaseDate),
         })
         toast.success(`Bill ${data.bill_id} updated.`)
         onSaved(data)
@@ -179,6 +188,7 @@ export default function BillForm({ bill, stock, customers, onSaved, onCancel }) 
           payment_type: paymentType,
           items: itemsPayload,
           deposited_amount: Number(deposited) || 0,
+          purchase_date: toInstant(purchaseDate),
         })
         toast.success(`Bill ${data.bill_id} generated.`)
         onSaved(data)
@@ -314,6 +324,19 @@ export default function BillForm({ bill, stock, customers, onSaved, onCancel }) 
               ))}
             </select>
           </label>
+          <DateTimeField
+            className="span-2"
+            label="Purchase Date & Time"
+            value={purchaseDate}
+            onChange={setPurchaseDate}
+            required
+            error={fieldErrors.purchaseDate}
+            note={
+              editing
+                ? 'Changing this moves the bill in every ledger, report and monthly total.'
+                : 'Defaults to now — change it if this sale happened earlier.'
+            }
+          />
         </div>
       </section>
 

@@ -7,6 +7,7 @@ from ..core.deps import get_current_user
 from ..database import get_db
 from ..models import Bill, Customer
 from ..schemas.common import CustomerCreate, CustomerUpdate
+from ..utils.dates import to_naive_utc
 from ..utils.serialize import customer_to_dict
 from ..utils.tables import import_customers, read_upload, template_response
 
@@ -49,13 +50,18 @@ def create_customer(payload: CustomerCreate, db: Session = Depends(get_db)):
     code = payload.customer_code.strip()
     if db.get(Customer, code):
         raise HTTPException(400, f"Customer Code '{code}' already exists.")
-    customer = Customer(
+    fields = dict(
         customer_code=code,
         customer_name=payload.customer_name.strip(),
         phone_number=payload.phone_number.strip(),
         shop_name=(payload.shop_name or "").strip() or None,
         address=(payload.address or "").strip() or None,
     )
+    created_at = to_naive_utc(payload.created_at)
+    if created_at is not None:
+        fields["created_at"] = created_at  # omitted entirely -> column default (now)
+
+    customer = Customer(**fields)
     db.add(customer)
     db.commit()
     db.refresh(customer)
@@ -73,6 +79,8 @@ def update_customer(
     customer.phone_number = payload.phone_number.strip()
     customer.shop_name = (payload.shop_name or "").strip() or None
     customer.address = (payload.address or "").strip() or None
+    if payload.created_at is not None:
+        customer.created_at = to_naive_utc(payload.created_at)
     db.commit()
     db.refresh(customer)
     return customer_to_dict(customer)

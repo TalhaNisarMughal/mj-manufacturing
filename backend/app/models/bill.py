@@ -60,6 +60,9 @@ class BillItem(Base):
     item_name = Column(String(255), nullable=False)  # snapshot at billing time
     description = Column(Text, nullable=True)
     unit_price = Column(Numeric(12, 2), nullable=False)
+    # Cost snapshot taken at billing time, so profit on a past sale stays
+    # fixed even after the item is re-stocked at a different cost.
+    cost_price = Column(Numeric(12, 2), nullable=False, default=0)
     discounted_price = Column(Numeric(12, 2), nullable=True)  # per-unit price after discount
     discount_percent = Column(Numeric(6, 2), nullable=False, default=0)
     qty = Column(Integer, nullable=False)

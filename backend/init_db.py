@@ -12,6 +12,7 @@ from pathlib import Path
 from app.config import settings
 from app.database import Base, engine
 from app.main import seed_default_users
+from app.migrations import run_migrations
 
 
 def apply_schema() -> None:
@@ -55,6 +56,9 @@ def main() -> int:
             "active, and this machine has internet access."
         )
         return 1
+
+    for change in run_migrations(engine):
+        print(f"Applied migration: {change}")
 
     print("Seeding admin and user accounts…")
     seed_default_users()

@@ -4,15 +4,22 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
-from .core.security import hash_password
+from .core.security import hash_password, verify_password
 from .database import Base, SessionLocal, engine
+from .migrations import run_migrations
 from .models import User
 from .routers import auth, bills, customers, dashboard, ledgers, stock
 from .utils.pdf import bills_dir
 
 
 def seed_default_users() -> None:
-    """Make sure the admin and user accounts from .env always exist."""
+    """Make sure the admin and user accounts from .env always exist.
+
+    The .env values are the source of truth, password included: if the stored
+    hash no longer matches the configured password, it is re-hashed here. That
+    is what makes "edit .env and restart" actually rotate a password — without
+    it an account created once would keep its original password forever.
+    """
     db = SessionLocal()
     try:
         for email, password, name, role in [
@@ -24,6 +31,8 @@ def seed_default_users() -> None:
             if existing:
                 existing.role = role
                 existing.full_name = name
+                if not verify_password(password, existing.hashed_password):
+                    existing.hashed_password = hash_password(password)
             else:
                 db.add(
                     User(
@@ -42,6 +51,11 @@ def seed_default_users() -> None:
 async def lifespan(app: FastAPI):
     # Safety net: if init_db.py wasn't run, still create tables and seed users.
     Base.metadata.create_all(bind=engine)
+    # create_all only ever adds whole tables, never columns to existing ones,
+    # so columns added after the first release are applied here. This is what
+    # lets a deploy against the live database migrate itself.
+    for change in run_migrations(engine):
+        print(f"Applied migration: {change}")
     seed_default_users()
     bills_dir()  # make sure the bill-slip directory exists
     yield

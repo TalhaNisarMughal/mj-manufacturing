@@ -1,7 +1,8 @@
 import { BookOpen, Pencil, Plus, Search, Trash2 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import api, { apiError, fmtDate } from '../api/client'
+import api, { apiError, fmtDate, nowLocalInput, toInstant, toLocalInput } from '../api/client'
+import DateTimeField from '../components/DateTimeField'
 import Modal from '../components/Modal'
 import UploadWidget from '../components/UploadWidget'
 import { useToast } from '../context/ToastContext'
@@ -12,6 +13,10 @@ function CustomerForm({ initial, onSaved, onCancel }) {
   const toast = useToast()
   const editing = Boolean(initial)
   const [form, setForm] = useState(initial || EMPTY)
+  // Pre-filled with now; only touched when recording a customer added earlier.
+  const [createdAt, setCreatedAt] = useState(
+    initial ? toLocalInput(initial.created_at) : nowLocalInput()
+  )
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -20,6 +25,7 @@ function CustomerForm({ initial, onSaved, onCancel }) {
   const submit = async (e) => {
     e.preventDefault()
     setError('')
+    if (!createdAt) return setError('Please pick a date for this customer.')
     setBusy(true)
     try {
       if (editing) {
@@ -28,6 +34,7 @@ function CustomerForm({ initial, onSaved, onCancel }) {
           phone_number: form.phone_number,
           shop_name: form.shop_name || null,
           address: form.address || null,
+          created_at: toInstant(createdAt),
         })
         toast.success('Customer updated.')
       } else {
@@ -35,6 +42,7 @@ function CustomerForm({ initial, onSaved, onCancel }) {
           ...form,
           shop_name: form.shop_name || null,
           address: form.address || null,
+          created_at: toInstant(createdAt),
         })
         toast.success('Customer saved.')
       }
@@ -77,6 +85,14 @@ function CustomerForm({ initial, onSaved, onCancel }) {
         <span>Address</span>
         <input value={form.address || ''} onChange={set('address')} placeholder="Optional" />
       </label>
+      <DateTimeField
+        className="span-2"
+        label="Date & Time"
+        value={createdAt}
+        onChange={setCreatedAt}
+        required
+        note="When this customer was added — change it to record one you have dealt with for longer."
+      />
       <div className="form-actions span-2">
         <button type="button" className="btn btn-ghost" onClick={onCancel}>
           Cancel
@@ -213,7 +229,11 @@ export default function Customers() {
       {modal && (
         <Modal
           title={modal === 'new' ? 'Add New Customer' : `Edit ${modal.customer_name}`}
-          subtitle={modal === 'new' ? 'The creation date is filled automatically.' : undefined}
+          subtitle={
+            modal === 'new'
+              ? 'Pick the date this customer was added — it defaults to now.'
+              : 'Fix anything that was entered wrong, including the date.'
+          }
           onClose={() => setModal(null)}
         >
           <CustomerForm

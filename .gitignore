@@ -14,3 +14,6 @@ backend/generated_bills/
 # Env (contains credentials)
 backend/.env
 frontend/.env
+
+# macOS
+.DS_Store

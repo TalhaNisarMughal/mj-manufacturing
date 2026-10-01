@@ -9,11 +9,18 @@ from sqlalchemy.orm import Session
 from ..core.deps import require_admin
 from ..database import get_db
 from ..models import Bill, BillItem, BillPayment, Customer, Stock
+from ..utils.profit import margin_percent
 from ..utils.serialize import f2
 
 router = APIRouter(
     prefix="/api/dashboard", tags=["dashboard"], dependencies=[Depends(require_admin)]
 )
+
+# Profit lives on a line, not on a bill: revenue minus the cost snapshot taken
+# when the sale was made. Expressed once here so every figure on this page and
+# the ledgers agree.
+LINE_PROFIT = BillItem.line_total - BillItem.cost_price * BillItem.qty
+LINE_COST = BillItem.cost_price * BillItem.qty
 
 
 def _local(dt: datetime, tz_offset: int) -> datetime:
@@ -35,6 +42,13 @@ def summary(tz_offset: int = Query(0), db: Session = Depends(get_db)):
     total_collected = db.query(func.coalesce(func.sum(Bill.deposited_amount), 0)).scalar() or 0
     outstanding = db.query(func.coalesce(func.sum(Bill.remaining_balance), 0)).scalar() or 0
 
+    cost_of_goods = db.query(func.coalesce(func.sum(LINE_COST), 0)).scalar() or 0
+    gross_profit = db.query(func.coalesce(func.sum(LINE_PROFIT), 0)).scalar() or 0
+    # Revenue booked against line items, which is what profit is measured
+    # against — not Bill.net_total, so a rounding difference cannot make the
+    # margin look wrong.
+    items_revenue = db.query(func.coalesce(func.sum(BillItem.line_total), 0)).scalar() or 0
+
     open_bills = db.query(func.count(Bill.bill_id)).filter(Bill.status == "open").scalar() or 0
     closed_bills = db.query(func.count(Bill.bill_id)).filter(Bill.status == "closed").scalar() or 0
 
@@ -52,6 +66,16 @@ def summary(tz_offset: int = Query(0), db: Session = Depends(get_db)):
         .scalar()
         or 0
     )
+    month_items = (
+        db.query(
+            func.coalesce(func.sum(LINE_PROFIT), 0),
+            func.coalesce(func.sum(BillItem.line_total), 0),
+        )
+        .join(Bill, BillItem.bill_id == Bill.bill_id)
+        .filter(Bill.purchase_date >= month_start_utc)
+        .first()
+    )
+    profit_this_month, revenue_items_this_month = month_items or (0, 0)
 
     # Most sold items (by units)
     top_items = (
@@ -63,6 +87,22 @@ def summary(tz_offset: int = Query(0), db: Session = Depends(get_db)):
         )
         .group_by(BillItem.item_name, BillItem.stock_barcode)
         .order_by(func.sum(BillItem.qty).desc())
+        .limit(7)
+        .all()
+    )
+
+    # Most profitable items — which is rarely the same list as the most sold,
+    # and that gap is usually the point of looking.
+    top_profit = (
+        db.query(
+            BillItem.item_name,
+            BillItem.stock_barcode,
+            func.sum(BillItem.qty).label("qty_sold"),
+            func.sum(BillItem.line_total).label("revenue"),
+            func.sum(LINE_PROFIT).label("profit"),
+        )
+        .group_by(BillItem.item_name, BillItem.stock_barcode)
+        .order_by(func.sum(LINE_PROFIT).desc())
         .limit(7)
         .all()
     )
@@ -114,6 +154,11 @@ def summary(tz_offset: int = Query(0), db: Session = Depends(get_db)):
             "bills_this_month": bills_this_month,
             "revenue_this_month": f2(revenue_this_month),
             "collected_this_month": f2(collected_this_month),
+            "cost_of_goods": f2(cost_of_goods),
+            "gross_profit": f2(gross_profit),
+            "margin_percent": margin_percent(gross_profit, items_revenue),
+            "profit_this_month": f2(profit_this_month),
+            "margin_this_month": margin_percent(profit_this_month, revenue_items_this_month),
         },
         "top_items": [
             {
@@ -123,6 +168,17 @@ def summary(tz_offset: int = Query(0), db: Session = Depends(get_db)):
                 "revenue": f2(r.revenue),
             }
             for r in top_items
+        ],
+        "top_profit_items": [
+            {
+                "item_name": r.item_name,
+                "stock_barcode": r.stock_barcode,
+                "qty_sold": int(r.qty_sold),
+                "revenue": f2(r.revenue),
+                "profit": f2(r.profit),
+                "margin": margin_percent(r.profit, r.revenue),
+            }
+            for r in top_profit
         ],
         "recurring_customers": [
             {
@@ -154,7 +210,7 @@ def revenue(
     tz_offset: int = Query(0),
     db: Session = Depends(get_db),
 ):
-    """Billed vs collected series, bucketed in the user's local time.
+    """Billed vs collected vs profit series, bucketed in the user's local time.
 
     day -> last 30 days, week -> last 12 weeks, month -> last 12 months,
     year -> last 5 years. Aggregated in Python so it works on any database.
@@ -207,6 +263,16 @@ def revenue(
     ):
         collected[keyfn(_local(dt, tz_offset))[0]] += Decimal(str(amount))
 
+    # Profit is bucketed by the bill's purchase date, same as billed — it is
+    # earned when the sale happens, not when the customer eventually pays.
+    profit = defaultdict(Decimal)
+    for dt, amount in (
+        db.query(Bill.purchase_date, LINE_PROFIT)
+        .join(BillItem, BillItem.bill_id == Bill.bill_id)
+        .filter(Bill.purchase_date >= start_utc)
+    ):
+        profit[keyfn(_local(dt, tz_offset))[0]] += Decimal(str(amount or 0))
+
     # Build the continuous label axis
     series = []
     cursor = start
@@ -227,6 +293,7 @@ def revenue(
                 "label": label,
                 "billed": f2(billed.get(key, Decimal("0"))),
                 "collected": f2(collected.get(key, Decimal("0"))),
+                "profit": f2(profit.get(key, Decimal("0"))),
             }
         )
     return {"granularity": granularity, "series": series}

@@ -52,15 +52,39 @@ Both accounts are created automatically from the values you set in `backend/.env
 ## 4. The modules
 
 ### Customers
-- Fields: Customer Code (unique ID), Customer Name, Phone Number, Shop Name (optional), Address (optional), creation date (automatic).
+- Fields: Customer Code (unique ID), Customer Name, Phone Number, Shop Name (optional), Address (optional), creation date (**you pick it** — pre-filled with now, editable any time).
 - Add customers one at a time, or bulk import with **Upload CSV / Excel**. Download the **CSV/Excel template** buttons to get the exact format.
 - Invalid rows are skipped and listed with the row number and the reason; valid rows still import.
 - Everything is editable later except the Customer Code.
 
 ### Store
-- Fields: Stock Barcode (unique ID), Stock Name, Qty, Unit Price, creation date (automatic).
-- Same one-by-one or bulk-upload flow, with the same templates and per-row error reporting.
+- Fields: Stock Barcode (unique ID), Stock Name, Qty, **Cost Price** (admin only), Unit Price, creation date (**you pick it** — pre-filled with now, editable any time).
+- **Cost Price** is what the item costs you; **Unit Price** is what you sell it for. The difference drives every profit figure in the app. The cost never appears on a bill, in a ledger PDF, or in anything a staff login can see — see *Cost price and profit* below.
+- Same one-by-one or bulk-upload flow, with the same templates and per-row error reporting. The templates now carry optional `cost_price` and `created_at` columns; leave them blank and nothing changes.
 - Low-stock items (≤ 5 units) and out-of-stock items are highlighted.
+
+### Cost price and profit (admin only)
+- Profit on a line is `(selling price − cost price) × qty`, with any discount already taken off the selling price — so a discount comes straight off the profit.
+- The cost is **snapshotted onto the bill when the sale is made**, not read live from the Store. Re-stocking an item at a new cost therefore never rewrites the profit on sales you already made.
+- Profit appears on the Dashboard, in all four ledgers and in the Store's margin column. **Cost itself is never shown** anywhere, and neither cost nor profit is sent to a staff login at all — the fields are omitted from the API response, not hidden in the browser.
+- Printed ledger PDFs deliberately carry **no profit**: they get handed to customers and salesmen.
+- **Re-sync cost on past bills** (Store, admin only) re-stamps every historical bill line with its item's current cost. Items that pre-date cost tracking were migrated at *cost = selling price*, so they report zero profit until you enter the real figures and run this once. It rewrites profit on bills already issued, so it is a deliberate button rather than something automatic.
+
+### Dates
+Every business date is yours to set, and to change later:
+
+| Where | Field |
+|---|---|
+| Bills & Ledger | Purchase date & time (on creation **and** on edit) |
+| Deposits | Deposit date & time, on a new deposit or when correcting an old one |
+| Store | When the stock came in |
+| Customers | When the customer was added |
+
+Each picker is pre-filled with the current moment, so the ordinary same-day entry needs no thought — you only touch it when recording something that happened earlier. Bulk imports accept an optional `created_at` column (`YYYY-MM-DD` or day-first `DD/MM/YYYY`, with an optional time); an unreadable date is reported against its row rather than silently becoming today.
+
+> A bill's **Last Modified** stamp stays automatic — it is an audit trail, not a business date.
+>
+> Backdating a bill moves it in every ledger, monthly total and dashboard figure. That is the point, but it does mean a report you printed yesterday can change.
 
 ### Bills & Ledger
 - **Generate New Bill** — choose an **Existing Customer** (searchable) or add a **New Customer** on the spot (they're saved to the Customers module too).
@@ -68,14 +92,15 @@ Both accounts are created automatically from the values you set in `backend/.env
 - Quantity is checked live against the store — if you ask for more than is available you'll see *"Quantity is not available in the inventory."*
 - Payment type: Debit / Credit / Cash / Cheque. The **Deposited Amount** can be 0 (credit sales are the default here) and the **Remaining Balance** is calculated automatically.
 - After generation a **PDF bill slip** is saved to `backend/generated_bills/` and can be previewed any time with the **eye** button.
-- **Deposits over time:** the banknote button records new deposits; deposited/remaining update everywhere and the full payment history is kept.
+- **Deposits over time:** the banknote button records new deposits, each with its own date; deposited/remaining update everywhere and the full payment history is kept.
+- **Correcting a deposit:** any recorded deposit can be edited (amount, date, note) or deleted from that same panel. The deposited total, remaining balance and open/closed status are re-derived from the deposits that actually exist — clearing a bill closes it, and taking money back off a cleared bill reopens it.
 - Bills **auto-close** when the balance reaches 0, and can also be manually toggled open/closed.
 - Rows are colour-coded: **yellow line = open** (balance remaining), **green line = closed** (fully cleared).
 - Edit or delete any bill — stock quantities are adjusted or returned to the store automatically, and the PDF slip is regenerated.
 - Search (case-insensitive) by customer name, item name, barcode, salesman or Bill ID, plus date-range and open/closed filters.
 
 ### Ledgers
-Three complete track records, each filterable and printable. Reachable from the **Ledgers** tab, and by clicking any customer, salesman or item name in Bills & Ledger, Customers or Store.
+Four complete track records, each filterable and printable. Reachable from the **Ledgers** tab, and by clicking any customer, salesman or item name in Bills & Ledger, Customers or Store.
 
 **Customer ledger** — a true running account. Bills are debits, payments are credits, merged into one chronological timeline so every row shows the balance *at that moment*. Includes an opening balance for the period, every item on every bill (qty, price, discount, line total), a summary of what the customer buys, and totals for the period.
 
@@ -85,16 +110,21 @@ Three complete track records, each filterable and printable. Reachable from the 
 
 **Item ledger** — where one item went. Which customers bought it (name, code, phone, shop, qty, dates, amounts, balances), which salesmen sold it, a month-by-month breakdown, and every individual sale. Shows what the item earned and what is still owed on it.
 
-**Filters (all three):** free-text search, quick ranges (this/last month, last 7/30 days, this/last year), a month picker, explicit From/To dates, and open/closed status. The salesman ledger adds a customer filter; the item ledger adds both customer and salesman filters.
+**Combined ledger** — the cross-ledger view, for the questions a single-subject ledger cannot answer: *which items did this salesman sell to these two customers, and how often?* Pick any mix of customers, salesmen and items — **several of each** — and leave a column empty to mean "all of them"; selecting nothing at all reports every sale in the business. You get the headline figures for exactly that slice, a **Customer × Salesman × Item** cross-tab with one row per combination actually sold, roll-ups by customer, by salesman, by item and by month, and the full line-by-line detail. The original three ledgers are untouched.
 
-**PDF:** every ledger has a **Preview / Print PDF** button — a landscape report built live from whatever filters are active, previewed in the app with Print and Download.
+> The combined view has no running balance, by design. Payments are recorded against a whole bill, so once the data is sliced by item there is no honest per-line balance to carry forward — the **Customer ledger** remains the place for *what does this account owe me*.
+
+**Filters (all four):** free-text search, quick ranges (this/last month, last 7/30 days, this/last year), a month picker, explicit From/To dates, and open/closed status. The salesman ledger adds a customer filter; the item ledger adds both customer and salesman filters.
+
+**PDF:** every ledger, the combined one included, has a **Preview / Print PDF** button — a landscape report built live from whatever filters are active, previewed in the app with Print and Download.
 
 > **On per-item money:** payments are recorded against a *bill*, not against individual lines. So the paid/outstanding figures on an item or salesman line are that line's proportional share of its bill, labelled "(share)" wherever they appear. Bill-level and customer-level figures are exact.
 
 ### Dashboard (admin only)
 - Totals: customers, items, units in stock, units sold, revenue and collections (this month + all time), outstanding balance, open/closed ledgers.
-- Revenue chart (billed vs collected) switchable between daily / weekly / monthly / yearly.
-- Most sold items, most recurring customers, most paying customers, and a low-stock watch list.
+- **Profit band:** gross profit and margin all-time, profit and margin this month, and cost of goods sold.
+- Revenue chart (billed vs collected vs **profit**) switchable between daily / weekly / monthly / yearly. Profit is counted on the date of the sale, not when the customer pays, so it tracks *billed* rather than *collected*.
+- Most sold items, **most profitable items** (rarely the same order — the gap is usually the interesting part), most recurring customers, most paying customers, and a low-stock watch list.
 
 ---
 
@@ -107,10 +137,11 @@ mj-manufacturing/
 │   │   ├── main.py            # FastAPI app + startup safety net
 │   │   ├── config.py          # reads backend/.env
 │   │   ├── database.py        # engine/session (Neon-friendly pooling)
+│   │   ├── migrations.py      # adds new columns to an existing DB on startup
 │   │   ├── models/            # SQLAlchemy models
 │   │   ├── schemas/           # Pydantic request validation
 │   │   ├── routers/           # auth, customers, stock, bills, ledgers, dashboard
-│   │   └── utils/             # CSV/Excel import, PDF slips, ledger reports, serializers
+│   │   └── utils/             # CSV/Excel import, PDF slips, ledger reports, profit, dates
 │   ├── generated_bills/       # PDF slips live here (auto-created)
 │   ├── init_db.py             # applies schema + seeds the two accounts
 │   ├── requirements.txt

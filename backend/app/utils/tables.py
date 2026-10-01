@@ -6,6 +6,7 @@ uploading can fix the file and try again.
 """
 import io
 import re
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
 import pandas as pd
@@ -17,22 +18,55 @@ from ..models import Customer, Stock
 
 PHONE_RE = re.compile(r"^[0-9+\-()\s]{4,50}$")
 
-CUSTOMER_COLUMNS = ["customer_code", "customer_name", "phone_number", "shop_name", "address"]
+# `created_at` and `cost_price` are optional columns: leave them blank (or drop
+# the column) and the import behaves exactly as it did before.
+CUSTOMER_COLUMNS = [
+    "customer_code", "customer_name", "phone_number", "shop_name", "address", "created_at",
+]
 CUSTOMER_SAMPLE = {
     "customer_code": "CUST-001",
     "customer_name": "Ali Traders",
     "phone_number": "0300-1234567",
     "shop_name": "Ali Karyana Store",
     "address": "Shop 12, Main Bazaar, Lahore",
+    "created_at": "2026-01-15 14:30",
 }
 
-STOCK_COLUMNS = ["stock_barcode", "stock_name", "qty", "unit_price"]
+STOCK_COLUMNS = ["stock_barcode", "stock_name", "qty", "unit_price", "cost_price", "created_at"]
 STOCK_SAMPLE = {
     "stock_barcode": "BC-1001",
     "stock_name": "Steel Bolt 10mm",
     "qty": "100",
     "unit_price": "25.50",
+    "cost_price": "18.00",
+    "created_at": "2026-01-15 14:30",
 }
+
+# Accepted spellings for an optional date cell. Day-first, because that is how
+# dates are written locally — 03/04/2026 is 3 April, never 4 March.
+DATE_FORMATS = [
+    "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
+    "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d/%m/%Y",
+    "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M", "%d-%m-%Y",
+    "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M",
+]
+
+
+def _parse_date(raw: str):
+    """Spreadsheet date cell -> naive datetime. Returns None when blank.
+
+    Raises ValueError for anything non-blank it cannot read, so a typo is
+    reported against its row instead of silently becoming today.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    for fmt in DATE_FORMATS:
+        try:
+            return datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+    raise ValueError(raw)
 
 
 def _normalize(col: str) -> str:
@@ -91,6 +125,7 @@ def import_customers(df: pd.DataFrame, db: Session) -> dict:
         phone = row.get("phone_number", "")
         shop = row.get("shop_name", "") or None
         address = row.get("address", "") or None
+        created_raw = row.get("created_at", "")
 
         if not any([code, name, phone]):  # fully empty row — ignore silently
             continue
@@ -116,15 +151,28 @@ def import_customers(df: pd.DataFrame, db: Session) -> dict:
             errors.append({"row": row_no, "error": f"Phone Number '{phone}' is not valid."})
             continue
 
-        db.add(
-            Customer(
-                customer_code=code,
-                customer_name=name,
-                phone_number=phone,
-                shop_name=shop,
-                address=address,
+        try:
+            created_at = _parse_date(created_raw)
+        except ValueError:
+            errors.append(
+                {
+                    "row": row_no,
+                    "error": f"Created date '{created_raw}' is not a date we can read. "
+                    "Use YYYY-MM-DD or DD/MM/YYYY, with an optional time.",
+                }
             )
+            continue
+
+        fields = dict(
+            customer_code=code,
+            customer_name=name,
+            phone_number=phone,
+            shop_name=shop,
+            address=address,
         )
+        if created_at is not None:
+            fields["created_at"] = created_at
+        db.add(Customer(**fields))
         seen_in_file.add(code)
         inserted += 1
 
@@ -132,7 +180,12 @@ def import_customers(df: pd.DataFrame, db: Session) -> dict:
     return {"inserted": inserted, "skipped": len(errors), "errors": errors}
 
 
-def import_stock(df: pd.DataFrame, db: Session) -> dict:
+def import_stock(df: pd.DataFrame, db: Session, allow_cost: bool = False) -> dict:
+    """Bulk-import store items.
+
+    `allow_cost` mirrors the Store form: only an admin may set a cost price, and
+    for anyone else an item costs what it sells for.
+    """
     _require_columns(df, ["stock_barcode", "stock_name", "qty", "unit_price"], "Store")
 
     existing = {s[0] for s in db.query(Stock.stock_barcode).all()}
@@ -145,6 +198,8 @@ def import_stock(df: pd.DataFrame, db: Session) -> dict:
         name = row.get("stock_name", "")
         qty_raw = row.get("qty", "")
         price_raw = row.get("unit_price", "")
+        cost_raw = row.get("cost_price", "")
+        created_raw = row.get("created_at", "")
 
         if not any([barcode, name, qty_raw, price_raw]):
             continue
@@ -178,7 +233,36 @@ def import_stock(df: pd.DataFrame, db: Session) -> dict:
             errors.append({"row": row_no, "error": f"Unit Price '{price_raw}' must be a number of 0 or more."})
             continue
 
-        db.add(Stock(stock_barcode=barcode, stock_name=name, qty=qty, unit_price=price))
+        cost = price  # no cost given (or not allowed to set one) -> zero profit
+        if allow_cost and (cost_raw or "").strip():
+            try:
+                cost = Decimal(cost_raw)
+                if cost < 0:
+                    raise InvalidOperation
+            except (InvalidOperation, ValueError):
+                errors.append(
+                    {"row": row_no, "error": f"Cost Price '{cost_raw}' must be a number of 0 or more."}
+                )
+                continue
+
+        try:
+            created_at = _parse_date(created_raw)
+        except ValueError:
+            errors.append(
+                {
+                    "row": row_no,
+                    "error": f"Created date '{created_raw}' is not a date we can read. "
+                    "Use YYYY-MM-DD or DD/MM/YYYY, with an optional time.",
+                }
+            )
+            continue
+
+        fields = dict(
+            stock_barcode=barcode, stock_name=name, qty=qty, unit_price=price, cost_price=cost
+        )
+        if created_at is not None:
+            fields["created_at"] = created_at
+        db.add(Stock(**fields))
         seen_in_file.add(barcode)
         inserted += 1
 

@@ -350,8 +350,11 @@ export default function Bills() {
         <PaymentModal
           bill={payBill}
           onClose={() => setPayBill(null)}
-          onSaved={() => {
-            setPayBill(null)
+          onSaved={(updated) => {
+            // Stay open and show the refreshed history: correcting a deposit
+            // is usually one of several fixes, and closing after each one
+            // would hide the very numbers being checked.
+            setPayBill(updated)
             loadBills()
           }}
         />
