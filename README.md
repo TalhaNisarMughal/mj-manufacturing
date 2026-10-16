@@ -99,6 +99,15 @@ Each picker is pre-filled with the current moment, so the ordinary same-day entr
 - Edit or delete any bill — stock quantities are adjusted or returned to the store automatically, and the PDF slip is regenerated.
 - Search (case-insensitive) by customer name, item name, barcode, salesman or Bill ID, plus date-range and open/closed filters.
 
+### Payments
+Collect money against a customer's **whole account** instead of bill by bill. Reachable from the **Payments** tab.
+
+- Pick a customer from the **dropdown** or the **search box** (name, code, phone or shop). The list shows every customer with what they owe, highest first, and a total outstanding across all customers at the bottom.
+- The account view shows the grand totals — **Total purchased**, **Total paid** (initial deposits at purchase included) and **Outstanding** — plus every bill with its own net / paid / remaining / status, and the complete deposit history across all bills, newest first.
+- **Record a payment** once: enter the amount received, an optional note and the date. A live preview shows how it will be split. The server applies it to the **oldest unpaid bill first**, then the next, until the money runs out; any bill whose balance reaches 0 is closed. The totals and the per-bill figures update together.
+- A payment can never exceed the outstanding total — the form refuses it, the same way a bill refuses a deposit above its balance.
+- Nothing changes in how money is stored: every rupee is still a deposit on a specific bill, so bill slips, the Customer ledger and all other reports stay correct. A payment that cleared more than one bill shows up once per bill it touched, with the same note and time. To correct or delete a deposit, open that bill in **Bills & Ledger** as before.
+
 ### Ledgers
 Four complete track records, each filterable and printable. Reachable from the **Ledgers** tab, and by clicking any customer, salesman or item name in Bills & Ledger, Customers or Store.
 

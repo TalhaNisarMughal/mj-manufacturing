@@ -8,7 +8,7 @@ from .core.security import hash_password, verify_password
 from .database import Base, SessionLocal, engine
 from .migrations import run_migrations
 from .models import User
-from .routers import auth, bills, customers, dashboard, ledgers, stock
+from .routers import auth, bills, customers, dashboard, ledgers, payments, stock
 from .utils.pdf import bills_dir
 
 
@@ -81,6 +81,7 @@ app.include_router(customers.router)
 app.include_router(stock.router)
 app.include_router(bills.router)
 app.include_router(ledgers.router)
+app.include_router(payments.router)
 app.include_router(dashboard.router)
 
 

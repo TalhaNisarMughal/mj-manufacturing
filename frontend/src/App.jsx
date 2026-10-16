@@ -7,6 +7,7 @@ import Customers from './pages/Customers'
 import Dashboard from './pages/Dashboard'
 import Ledgers from './pages/Ledgers'
 import Login from './pages/Login'
+import Payments from './pages/Payments'
 import Store from './pages/Store'
 
 function RequireAuth({ children }) {
@@ -54,6 +55,7 @@ export default function App() {
               <Route path="/store" element={<Store />} />
               <Route path="/bills" element={<Bills />} />
               <Route path="/ledgers" element={<Ledgers />} />
+              <Route path="/payments" element={<Payments />} />
             </Route>
             <Route path="/" element={<Home />} />
             <Route path="*" element={<Home />} />

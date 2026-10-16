@@ -1,4 +1,4 @@
-import { BookOpen, LayoutDashboard, LogOut, Package, ReceiptText, Users } from 'lucide-react'
+import { BookOpen, LayoutDashboard, LogOut, Package, ReceiptText, Users, Wallet } from 'lucide-react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 
@@ -39,6 +39,9 @@ export default function Layout() {
           </NavLink>
           <NavLink to="/ledgers" className="nav-link">
             <BookOpen size={17} /> Ledgers
+          </NavLink>
+          <NavLink to="/payments" className="nav-link">
+            <Wallet size={17} /> Payments
           </NavLink>
         </nav>
 

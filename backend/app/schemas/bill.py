@@ -56,5 +56,17 @@ class PaymentUpdate(BaseModel):
     payment_date: Optional[datetime] = None
 
 
+class AccountPaymentIn(BaseModel):
+    """One payment against a customer's whole account (the Payments page).
+
+    The server spreads it over the customer's unpaid bills, oldest first, so
+    there is no bill id here on purpose.
+    """
+
+    amount: float = Field(gt=0)
+    note: Optional[str] = None
+    payment_date: Optional[datetime] = None
+
+
 class StatusIn(BaseModel):
     status: Literal["open", "closed"]
